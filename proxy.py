@@ -2559,6 +2559,27 @@ def v1_chat_completions():
     model_name = data.get("model", "")
     do_stream = data.get("stream", False)
     messages = data.get("messages", [])
+    # Backwards-compat: some clients send a legacy `prompt` or `input` field
+    # instead of the OpenAI `messages` array. If `messages` is empty, normalize
+    # `prompt`/`input` into a single-message array so older clients still work.
+    if not messages:
+        legacy_prompt = data.get("prompt") or data.get("input")
+        if legacy_prompt:
+            # Accept both string and single-element-list shapes.
+            if isinstance(legacy_prompt, list):
+                # If it's a list of strings, join with newlines; if it's a list
+                # of structured blocks, stringify the first element.
+                if legacy_prompt and isinstance(legacy_prompt[0], str):
+                    legacy_text = "\n".join(legacy_prompt)
+                else:
+                    # Fallback: coerce the first element to string.
+                    legacy_text = str(legacy_prompt[0]) if legacy_prompt else ""
+            else:
+                legacy_text = str(legacy_prompt)
+            messages = [{"role": "user", "content": legacy_text}]
+            log.debug(
+                "Normalized legacy prompt/input into messages (len=%d)", len(messages)
+            )
     log.debug(
         "/v1/chat/completions model=%r stream=%s msgs=%d",
         model_name,
