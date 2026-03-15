@@ -115,7 +115,7 @@ def _set_copilot_token(token: str) -> None:
 
 
 def _discover_copilot_models() -> list[dict]:
-    """Query api.githubcopilot.com/models and return catalogue entries."""
+    """Query api.githubcopilot.com/models, probe each, and return working chat models."""
     token = _get_copilot_token()
     if not token:
         return []
@@ -127,29 +127,37 @@ def _discover_copilot_models() -> list[dict]:
         )
         resp.raise_for_status()
         raw = resp.json().get("data", [])
-        # Only keep chat models (skip embedding / image models)
         SKIP = {"embeddings", "embed", "image", "dall-e", "whisper", "tts"}
+        candidates = [
+            m.get("id", "")
+            for m in raw
+            if m.get("id") and not any(kw in m.get("id", "").lower() for kw in SKIP)
+        ]
+
+        log.info("Probing %d candidate Copilot models...", len(candidates))
         entries = []
-        for m in raw:
-            mid = m.get("id", "")
-            if not mid:
-                continue
-            if any(kw in mid.lower() for kw in SKIP):
-                continue
-            entries.append(
-                {
-                    "name": f"{GC_PREFIX}{mid}",
-                    "sdk_name": mid,
-                    "token": "copilot",
-                    "size": 0,
-                    "modified_at": "2024-01-01T00:00:00Z",
-                    "details": {
-                        "family": mid.split("-")[0].lower(),
-                        "parameter_size": "unknown",
-                    },
-                }
-            )
-        log.info("Discovered %d Copilot models (GC |)", len(entries))
+        for mid in candidates:
+            if _probe_chat_model(
+                token, mid, COPILOT_CHAT_ENDPOINT, COPILOT_CHAT_HEADERS
+            ):
+                log.debug("  OK  %s", mid)
+                entries.append(
+                    {
+                        "name": f"{GC_PREFIX}{mid}",
+                        "sdk_name": mid,
+                        "token": "copilot",
+                        "size": 0,
+                        "modified_at": "2024-01-01T00:00:00Z",
+                        "details": {
+                            "family": mid.split("-")[0].lower(),
+                            "parameter_size": "unknown",
+                        },
+                    }
+                )
+            else:
+                log.debug("  --  %s (skipped — not chat capable)", mid)
+
+        log.info("Discovered %d working Copilot models (GC |)", len(entries))
         return entries
     except Exception as e:
         log.warning("Copilot model discovery failed: %s", e)
@@ -188,15 +196,38 @@ _FALLBACK_MODELS = [
 ]
 
 
+def _probe_chat_model(
+    token: str, sdk_name: str, endpoint: str, extra_headers: dict = {}
+) -> bool:
+    """Return True if the model responds 200 to a minimal chat request."""
+    try:
+        r = requests.post(
+            f"{endpoint}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                **extra_headers,
+            },
+            json={
+                "model": sdk_name,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            },
+            timeout=15,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 def _discover_models(token: str, prefix: str, token_label: str) -> list[dict]:
     """
-    Query the GitHub Models catalogue endpoint and return a list of proxy
-    model entries. Falls back to the hardcoded list on any error.
+    Query the GitHub Models catalogue endpoint, probe each candidate with a
+    real chat request, and return only the models that actually work.
+    Falls back to the hardcoded list on any error.
     """
     if not token:
         return []
-
-    fallback = _FALLBACK_MODELS
 
     try:
         resp = requests.get(
@@ -207,35 +238,43 @@ def _discover_models(token: str, prefix: str, token_label: str) -> list[dict]:
         resp.raise_for_status()
         raw_models = resp.json()
 
-        # Filter to chat-capable models only (skip embedding models)
-        EMBEDDING_KEYWORDS = {"embed", "embedding"}
-        chat_models = [
-            m
+        # Pre-filter obvious non-chat models by name
+        SKIP_KEYWORDS = {"embed", "embedding", "tts", "whisper", "dall-e", "image"}
+        candidates = [
+            m.get("name", "")
             for m in raw_models
-            if not any(kw in m.get("name", "").lower() for kw in EMBEDDING_KEYWORDS)
+            if m.get("name")
+            and not any(kw in m.get("name", "").lower() for kw in SKIP_KEYWORDS)
         ]
 
+        log.info(
+            "Probing %d candidate models for %s token...",
+            len(candidates),
+            token_label,
+        )
+
         entries = []
-        for m in chat_models:
-            sdk_name = m.get("name", "")
-            if not sdk_name:
-                continue
-            entries.append(
-                {
-                    "name": f"{prefix}{sdk_name}",
-                    "sdk_name": sdk_name,
-                    "token": token_label,
-                    "size": 0,
-                    "modified_at": "2024-01-01T00:00:00Z",
-                    "details": {
-                        "family": sdk_name.split("-")[0].lower(),
-                        "parameter_size": "unknown",
-                    },
-                }
-            )
+        for sdk_name in candidates:
+            if _probe_chat_model(token, sdk_name, GITHUB_INFERENCE_ENDPOINT):
+                log.debug("  OK  %s", sdk_name)
+                entries.append(
+                    {
+                        "name": f"{prefix}{sdk_name}",
+                        "sdk_name": sdk_name,
+                        "token": token_label,
+                        "size": 0,
+                        "modified_at": "2024-01-01T00:00:00Z",
+                        "details": {
+                            "family": sdk_name.split("-")[0].lower(),
+                            "parameter_size": "unknown",
+                        },
+                    }
+                )
+            else:
+                log.debug("  --  %s (skipped — not chat capable)", sdk_name)
 
         log.info(
-            "Discovered %d chat models for %s token (prefix '%s')",
+            "Discovered %d working chat models for %s token (prefix '%s')",
             len(entries),
             token_label,
             prefix,
@@ -257,7 +296,7 @@ def _discover_models(token: str, prefix: str, token_label: str) -> list[dict]:
                 "modified_at": "2024-01-01T00:00:00Z",
                 "details": {"family": f["family"], "parameter_size": f["size"]},
             }
-            for f in fallback
+            for f in _FALLBACK_MODELS
         ]
 
 
