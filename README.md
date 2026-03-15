@@ -75,9 +75,9 @@ In your Continue.dev `config.json`, point the provider at the proxy using the **
 
 ## Available Models
 
-### GitHub Models (`GH | ` prefix)
+### Standard GitHub Models (`GH | ` prefix)
 
-These are the models confirmed available via `https://models.inference.ai.azure.com` with a standard GitHub PAT (`models:read` scope):
+Available with a regular GitHub PAT (`GITHUB_TOKEN`). Confirmed working via `https://models.inference.ai.azure.com`:
 
 | Display name | GitHub SDK model ID |
 |---|---|
@@ -88,11 +88,23 @@ These are the models confirmed available via `https://models.inference.ai.azure.
 | `GH \| Meta-Llama-3.1-405B-Instruct` | `Meta-Llama-3.1-405B-Instruct` |
 | `GH \| Meta-Llama-3.1-8B-Instruct` | `Meta-Llama-3.1-8B-Instruct` |
 
-> **Note:** Claude, Gemini, and Grok models require a GitHub Copilot subscription token and are not available with a standard PAT. To see exactly which models your token can access, run:
+> To see exactly which models your token can access:
 > ```bash
 > curl -H "Authorization: Bearer $GITHUB_TOKEN" https://models.inference.ai.azure.com/models
 > ```
-> You can add any model returned by that endpoint to the `GITHUB_MODELS` catalogue in `proxy.py`.
+
+### GitHub Copilot Models (`GC | ` prefix)
+
+Requires a Copilot Pro / Business / Enterprise token (`GITHUB_TOKEN_COPILOT`). These models are hidden from the model list until `GITHUB_TOKEN_COPILOT` is set in your `.env`:
+
+| Display name | GitHub SDK model ID |
+|---|---|
+| `GC \| claude-haiku-4-5` | `claude-haiku-4-5` |
+| `GC \| claude-sonnet-4-5` | `claude-sonnet-4-5` |
+| `GC \| claude-opus-4-5` | `claude-opus-4-5` |
+| `GC \| gemini-2.0-flash` | `gemini-2.0-flash` |
+| `GC \| grok-3` | `grok-3` |
+| `GC \| grok-3-mini` | `grok-3-mini` |
 
 ### Remote Ollama Models (`155 | ` prefix)
 
@@ -139,7 +151,8 @@ All configuration is via environment variables (or a `.env` file):
 
 | Variable | Default | Description |
 |---|---|---|
-| `GITHUB_TOKEN` | *(required for GH models)* | GitHub PAT with `models:read` scope |
+| `GITHUB_TOKEN` | *(required for `GH \|` models)* | Standard GitHub PAT — create at github.com/settings/tokens |
+| `GITHUB_TOKEN_COPILOT` | *(optional, for `GC \|` models)* | Copilot Pro/Business/Enterprise PAT — unlocks Claude, Gemini, Grok |
 | `REMOTE_OLLAMA_URL` | `http://192.168.1.155:11434` | Remote Ollama server address |
 | `PORT` | `5000` | Port the proxy listens on |
 

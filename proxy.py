@@ -50,6 +50,7 @@ REMOTE_OLLAMA_URL = os.getenv("REMOTE_OLLAMA_URL", "http://192.168.1.155:11434")
 PORT = int(os.getenv("PORT", "5000"))
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_TOKEN_COPILOT = os.getenv("GITHUB_TOKEN_COPILOT", "")
 GITHUB_INFERENCE_ENDPOINT = "https://models.inference.ai.azure.com"
 
 # ---------------------------------------------------------------------------
@@ -58,18 +59,26 @@ GITHUB_INFERENCE_ENDPOINT = "https://models.inference.ai.azure.com"
 # "name"     — the display name exposed to Ollama clients (e.g. Continue.dev)
 #              Always carries the "GH | " prefix so clients can distinguish them.
 # "sdk_name" — the model identifier accepted by the GitHub inference endpoint
+# "token"    — which env token to use: "standard" (GITHUB_TOKEN) or
+#              "copilot" (GITHUB_TOKEN_COPILOT)
 # ---------------------------------------------------------------------------
 
 GH_PREFIX = "GH | "
+GC_PREFIX = "GC | "
 REMOTE_PREFIX = "155 | "
 
-# Only models confirmed working against https://models.inference.ai.azure.com
-# with a standard GitHub PAT (models:read scope).
-# To verify available models for your token: GET https://models.inference.ai.azure.com/models
+# Standard-tier: confirmed working with a regular GitHub PAT (GITHUB_TOKEN).
+# Copilot-tier:  requires a Copilot Pro/Business/Enterprise token (GITHUB_TOKEN_COPILOT).
+# To discover which models your token can access:
+#   GET https://models.inference.ai.azure.com/models  (with your Authorization header)
 GITHUB_MODELS = [
+    # ------------------------------------------------------------------
+    # Standard PAT models (GITHUB_TOKEN)
+    # ------------------------------------------------------------------
     {
         "name": "GH | gpt-4o",
         "sdk_name": "gpt-4o",
+        "token": "standard",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
         "details": {"family": "gpt", "parameter_size": "unknown"},
@@ -77,6 +86,7 @@ GITHUB_MODELS = [
     {
         "name": "GH | gpt-4o-mini",
         "sdk_name": "gpt-4o-mini",
+        "token": "standard",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
         "details": {"family": "gpt", "parameter_size": "unknown"},
@@ -84,6 +94,7 @@ GITHUB_MODELS = [
     {
         "name": "GH | gpt-4.1",
         "sdk_name": "gpt-4.1",
+        "token": "standard",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
         "details": {"family": "gpt", "parameter_size": "unknown"},
@@ -91,6 +102,7 @@ GITHUB_MODELS = [
     {
         "name": "GH | gpt-4.1-mini",
         "sdk_name": "gpt-4.1-mini",
+        "token": "standard",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
         "details": {"family": "gpt", "parameter_size": "unknown"},
@@ -98,6 +110,7 @@ GITHUB_MODELS = [
     {
         "name": "GH | Meta-Llama-3.1-405B-Instruct",
         "sdk_name": "Meta-Llama-3.1-405B-Instruct",
+        "token": "standard",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
         "details": {"family": "llama", "parameter_size": "405B"},
@@ -105,14 +118,97 @@ GITHUB_MODELS = [
     {
         "name": "GH | Meta-Llama-3.1-8B-Instruct",
         "sdk_name": "Meta-Llama-3.1-8B-Instruct",
+        "token": "standard",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
         "details": {"family": "llama", "parameter_size": "8B"},
     },
+    # ------------------------------------------------------------------
+    # Copilot-tier models (GITHUB_TOKEN_COPILOT)
+    # Requires Copilot Pro / Business / Enterprise subscription.
+    # These entries are only surfaced in /api/tags and /v1/models when
+    # GITHUB_TOKEN_COPILOT is set; they are skipped otherwise.
+    # ------------------------------------------------------------------
+    {
+        "name": "GC | claude-haiku-4-5",
+        "sdk_name": "claude-haiku-4-5",
+        "token": "copilot",
+        "size": 0,
+        "modified_at": "2024-01-01T00:00:00Z",
+        "details": {"family": "claude", "parameter_size": "unknown"},
+    },
+    {
+        "name": "GC | claude-sonnet-4-5",
+        "sdk_name": "claude-sonnet-4-5",
+        "token": "copilot",
+        "size": 0,
+        "modified_at": "2024-01-01T00:00:00Z",
+        "details": {"family": "claude", "parameter_size": "unknown"},
+    },
+    {
+        "name": "GC | claude-opus-4-5",
+        "sdk_name": "claude-opus-4-5",
+        "token": "copilot",
+        "size": 0,
+        "modified_at": "2024-01-01T00:00:00Z",
+        "details": {"family": "claude", "parameter_size": "unknown"},
+    },
+    {
+        "name": "GC | gemini-2.0-flash",
+        "sdk_name": "gemini-2.0-flash",
+        "token": "copilot",
+        "size": 0,
+        "modified_at": "2024-01-01T00:00:00Z",
+        "details": {"family": "gemini", "parameter_size": "unknown"},
+    },
+    {
+        "name": "GC | grok-3",
+        "sdk_name": "grok-3",
+        "token": "copilot",
+        "size": 0,
+        "modified_at": "2024-01-01T00:00:00Z",
+        "details": {"family": "grok", "parameter_size": "unknown"},
+    },
+    {
+        "name": "GC | grok-3-mini",
+        "sdk_name": "grok-3-mini",
+        "token": "copilot",
+        "size": 0,
+        "modified_at": "2024-01-01T00:00:00Z",
+        "details": {"family": "grok", "parameter_size": "unknown"},
+    },
 ]
 
 # Fast lookup: display name -> catalogue entry
+# Copilot-tier entries are always included in the map (for routing), but are
+# filtered out of public listings when GITHUB_TOKEN_COPILOT is not set.
 GITHUB_MODEL_MAP: dict[str, dict] = {m["name"]: m for m in GITHUB_MODELS}
+
+
+def _active_github_models() -> list[dict]:
+    """Return only the models whose required token is currently configured."""
+    result = []
+    for m in GITHUB_MODELS:
+        if m["token"] == "copilot" and not GITHUB_TOKEN_COPILOT:
+            continue
+        if m["token"] == "standard" and not GITHUB_TOKEN:
+            continue
+        result.append(m)
+    return result
+
+
+def _token_for_model(name: str) -> str:
+    """Return the appropriate token string for the given (canonical) model name."""
+    entry = GITHUB_MODEL_MAP.get(name, {})
+    if entry.get("token") == "copilot":
+        if not GITHUB_TOKEN_COPILOT:
+            raise RuntimeError(
+                f"'{name}' requires GITHUB_TOKEN_COPILOT, which is not set."
+            )
+        return GITHUB_TOKEN_COPILOT
+    if not GITHUB_TOKEN:
+        raise RuntimeError(f"'{name}' requires GITHUB_TOKEN, which is not set.")
+    return GITHUB_TOKEN
 
 
 def is_github_model(name: str) -> bool:
@@ -123,24 +219,27 @@ def is_github_model(name: str) -> bool:
 def _canonical_gh_name(name: str) -> str:
     """Return the prefixed display name regardless of whether the prefix was supplied.
 
-    Handles three input forms:
-      - "GH | claude-haiku-4-5"  (already canonical)
+    Handles these input forms:
+      - "GH | gpt-4o"            (already canonical, standard)
+      - "GC | claude-haiku-4-5"  (already canonical, copilot)
       - "claude-haiku-4-5"       (bare, dashes)
       - "claude-haiku-4.5"       (bare, dots — as sent by Continue.dev)
     """
     if name in GITHUB_MODEL_MAP:
         return name
-    # Try adding the prefix as-is
-    prefixed = GH_PREFIX + name
-    if prefixed in GITHUB_MODEL_MAP:
-        return prefixed
+    # Try both prefixes as-is
+    for prefix in (GH_PREFIX, GC_PREFIX):
+        prefixed = prefix + name
+        if prefixed in GITHUB_MODEL_MAP:
+            return prefixed
     # Normalise dots to dashes and try again (e.g. "claude-haiku-4.5" -> "claude-haiku-4-5")
     normalised = name.replace(".", "-")
     if normalised in GITHUB_MODEL_MAP:
         return normalised
-    prefixed_normalised = GH_PREFIX + normalised
-    if prefixed_normalised in GITHUB_MODEL_MAP:
-        return prefixed_normalised
+    for prefix in (GH_PREFIX, GC_PREFIX):
+        prefixed_normalised = prefix + normalised
+        if prefixed_normalised in GITHUB_MODEL_MAP:
+            return prefixed_normalised
     return name
 
 
@@ -231,14 +330,12 @@ def make_streaming_proxy_response(
 # ---------------------------------------------------------------------------
 
 
-def _build_github_client() -> ChatCompletionsClient:
-    if not GITHUB_TOKEN:
-        raise RuntimeError(
-            "GITHUB_TOKEN is not set. Add it to your .env file or environment."
-        )
+def _build_github_client(model_name: str) -> ChatCompletionsClient:
+    """Build a ChatCompletionsClient using the correct token for the model."""
+    token = _token_for_model(model_name)
     return ChatCompletionsClient(
         endpoint=GITHUB_INFERENCE_ENDPOINT,
-        credential=AzureKeyCredential(GITHUB_TOKEN),
+        credential=AzureKeyCredential(token),
     )
 
 
@@ -265,7 +362,7 @@ def _github_chat_streaming(model_name: str, messages: list[dict]):
     """
     sdk_name = get_sdk_name(model_name)
     sdk_messages = _ollama_messages_to_sdk(messages)
-    client = _build_github_client()
+    client = _build_github_client(model_name)
 
     try:
         response = client.complete(
@@ -320,7 +417,7 @@ def _github_chat_blocking(model_name: str, messages: list[dict]) -> dict:
     """
     sdk_name = get_sdk_name(model_name)
     sdk_messages = _ollama_messages_to_sdk(messages)
-    client = _build_github_client()
+    client = _build_github_client(model_name)
 
     try:
         response = client.complete(
@@ -430,9 +527,11 @@ def get_tags():
         if not m.get("name", "").startswith(REMOTE_PREFIX):
             m["name"] = REMOTE_PREFIX + m["name"]
 
-    # Strip sdk_name from the catalogue before sending to clients
+    # Only show models whose token is configured; strip internal fields
+    _INTERNAL_KEYS = {"sdk_name", "token"}
     github_entries = [
-        {k: v for k, v in m.items() if k != "sdk_name"} for m in GITHUB_MODELS
+        {k: v for k, v in m.items() if k not in _INTERNAL_KEYS}
+        for m in _active_github_models()
     ]
     return jsonify({"models": remote_models + github_entries})
 
@@ -497,9 +596,19 @@ def chat():
         return make_proxy_response(resp)
 
     if is_github_model(model_name):
-        model_name = _canonical_gh_name(model_name)
-        if not GITHUB_TOKEN:
-            err = {"error": "GITHUB_TOKEN is not configured on the proxy server."}
+        entry = GITHUB_MODEL_MAP.get(_canonical_gh_name(model_name), {})
+        required_token = (
+            GITHUB_TOKEN_COPILOT if entry.get("token") == "copilot" else GITHUB_TOKEN
+        )
+        if not required_token:
+            token_var = (
+                "GITHUB_TOKEN_COPILOT"
+                if entry.get("token") == "copilot"
+                else "GITHUB_TOKEN"
+            )
+            err = {
+                "error": f"'{model_name}' requires {token_var}, which is not set in your .env."
+            }
             return jsonify(err), 500
 
         if do_stream:
@@ -545,8 +654,19 @@ def generate():
 
     if is_github_model(model_name):
         model_name = _canonical_gh_name(model_name)
-        if not GITHUB_TOKEN:
-            err = {"error": "GITHUB_TOKEN is not configured on the proxy server."}
+        entry = GITHUB_MODEL_MAP.get(model_name, {})
+        required_token = (
+            GITHUB_TOKEN_COPILOT if entry.get("token") == "copilot" else GITHUB_TOKEN
+        )
+        if not required_token:
+            token_var = (
+                "GITHUB_TOKEN_COPILOT"
+                if entry.get("token") == "copilot"
+                else "GITHUB_TOKEN"
+            )
+            err = {
+                "error": f"'{model_name}' requires {token_var}, which is not set in your .env."
+            }
             return jsonify(err), 500
 
         if do_stream:
@@ -596,8 +716,21 @@ def chat_completions():
     # result in an OpenAI-compat envelope (non-streaming only for simplicity).
     if is_github_model(model_name):
         model_name = _canonical_gh_name(model_name)
-        if not GITHUB_TOKEN:
-            return jsonify({"error": "GITHUB_TOKEN is not configured."}), 500
+        entry = GITHUB_MODEL_MAP.get(model_name, {})
+        required_token = (
+            GITHUB_TOKEN_COPILOT if entry.get("token") == "copilot" else GITHUB_TOKEN
+        )
+        if not required_token:
+            token_var = (
+                "GITHUB_TOKEN_COPILOT"
+                if entry.get("token") == "copilot"
+                else "GITHUB_TOKEN"
+            )
+            return jsonify(
+                {
+                    "error": f"'{model_name}' requires {token_var}, which is not set in your .env."
+                }
+            ), 500
 
         messages = data.get("messages", [])
         result = _github_chat_blocking(model_name, messages)
@@ -718,7 +851,12 @@ def health():
     except Exception:
         remote_status = "error"
 
-    github_status = "ready" if GITHUB_TOKEN else "no token — set GITHUB_TOKEN"
+    github_status = {
+        "standard": "ready" if GITHUB_TOKEN else "not set — add GITHUB_TOKEN to .env",
+        "copilot": "ready"
+        if GITHUB_TOKEN_COPILOT
+        else "not set — add GITHUB_TOKEN_COPILOT to .env (optional)",
+    }
     status = "healthy" if remote_status == "ok" else "degraded"
 
     return jsonify(
@@ -785,7 +923,7 @@ def _all_models_as_openai() -> list[dict]:
     except Exception as e:
         log.warning("Could not reach remote Ollama for /v1/models: %s", e)
 
-    for m in GITHUB_MODELS:
+    for m in _active_github_models():
         models.append(
             {
                 "id": m["name"],
@@ -811,7 +949,7 @@ def _github_chat_streaming_openai(model_name: str, messages: list[dict]):
     """
     sdk_name = get_sdk_name(model_name)
     sdk_messages = _ollama_messages_to_sdk(messages)
-    client = _build_github_client()
+    client = _build_github_client(model_name)
     created = int(datetime.now(timezone.utc).timestamp())
 
     try:
@@ -882,11 +1020,20 @@ def v1_chat_completions():
 
     if is_github_model(model_name):
         model_name = _canonical_gh_name(model_name)
-        if not GITHUB_TOKEN:
+        entry = GITHUB_MODEL_MAP.get(model_name, {})
+        required_token = (
+            GITHUB_TOKEN_COPILOT if entry.get("token") == "copilot" else GITHUB_TOKEN
+        )
+        if not required_token:
+            token_var = (
+                "GITHUB_TOKEN_COPILOT"
+                if entry.get("token") == "copilot"
+                else "GITHUB_TOKEN"
+            )
             return jsonify(
                 {
                     "error": {
-                        "message": "GITHUB_TOKEN is not configured.",
+                        "message": f"'{model_name}' requires {token_var}, which is not set in your .env.",
                         "type": "api_error",
                     }
                 }
@@ -948,13 +1095,25 @@ def v1_chat_completions():
 
 if __name__ == "__main__":
     log.info("Starting Ollama Proxy Server")
-    log.info("Proxying Ollama to : %s", REMOTE_OLLAMA_URL)
-    log.info("GitHub Models      : %s", GITHUB_INFERENCE_ENDPOINT)
+    log.info("Proxying Ollama to    : %s", REMOTE_OLLAMA_URL)
+    log.info("GitHub Models         : %s", GITHUB_INFERENCE_ENDPOINT)
     log.info(
-        "GitHub token       : %s",
-        "configured" if GITHUB_TOKEN else "NOT SET — GitHub models will return 500",
+        "GITHUB_TOKEN          : %s",
+        "configured"
+        if GITHUB_TOKEN
+        else "NOT SET — standard GH models will return 500",
     )
-    log.info("GitHub model count : %d", len(GITHUB_MODELS))
+    log.info(
+        "GITHUB_TOKEN_COPILOT  : %s",
+        "configured"
+        if GITHUB_TOKEN_COPILOT
+        else "not set — Copilot-tier models hidden",
+    )
+    log.info(
+        "Active GitHub models  : %d / %d",
+        len(_active_github_models()),
+        len(GITHUB_MODELS),
+    )
     log.info("Listening on       : http://0.0.0.0:%d", PORT)
     # debug=False is intentional — debug mode returns HTML error pages
     app.run(host="0.0.0.0", port=PORT, debug=False)
