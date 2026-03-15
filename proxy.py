@@ -25,6 +25,7 @@ import time
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 import requests
 import urllib3
@@ -35,13 +36,16 @@ from azure.core.exceptions import HttpResponseError
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, stream_with_context
 
-_BOTO3_AVAILABLE: bool
+_boto3_available: bool
 try:
     import boto3 as boto3  # noqa: PLC0414
 
-    _BOTO3_AVAILABLE = True
+    _boto3_available = True
 except ImportError:
-    _BOTO3_AVAILABLE = False
+    _boto3_available = False
+
+# Public alias used throughout the module
+_BOTO3_AVAILABLE = _boto3_available
 
 load_dotenv()
 
@@ -107,7 +111,7 @@ BR_PREFIX = "BR | "
 # All entries have been verified working with the CodeLight IAM user.
 # Models that require on-demand throughput use inference profile IDs (us.* prefix)
 # rather than bare model IDs — Bedrock requires this for most non-Mistral models.
-_BEDROCK_CANDIDATE_MODELS: list[dict] = [
+_BEDROCK_CANDIDATE_MODELS: list[dict[str, str]] = [
     # --- Anthropic Claude (inference profiles — verified OK) ---
     {
         "sdk_name": "us.anthropic.claude-3-haiku-20240307-v1:0",
@@ -540,8 +544,8 @@ def _rebuild_catalogue(
     covered_sdk_names = gh_sdk_names | {m["sdk_name"] for m in unique_gc}
     br_models = _build_bedrock_catalogue(covered_sdk_names)
 
-    GITHUB_MODELS = gh_models + unique_gc + br_models  # type: ignore[assignment]
-    GITHUB_MODEL_MAP = {m["name"]: m for m in GITHUB_MODELS}  # type: ignore[assignment]
+    GITHUB_MODELS = gh_models + unique_gc + br_models  # type: ignore[assignment,operator]
+    GITHUB_MODEL_MAP = {str(m["name"]): m for m in GITHUB_MODELS}  # type: ignore[assignment]
     log.info(
         "Catalogue rebuilt: %d GH | + %d GC | + %d BR | = %d total",
         len(gh_models),
@@ -558,14 +562,14 @@ def _rebuild_catalogue(
 
 def _bedrock_client():  # type: ignore[return]
     """Return a boto3 bedrock-runtime client, or None if credentials are missing."""
-    if not _BOTO3_AVAILABLE:
+    if not _boto3_available:
         log.warning(
             "boto3 is not installed — BR | models unavailable. Run: pip install boto3"
         )
         return None
     if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
         return None
-    return boto3.client(  # type: ignore[possibly-unbound]
+    return boto3.client(  # type: ignore[possibly-unbound,union-attr]
         "bedrock-runtime",
         region_name=AWS_BEDROCK_REGION,
         aws_access_key_id=AWS_ACCESS_KEY_ID,
@@ -584,7 +588,7 @@ def _build_bedrock_catalogue(
     Instead we include all candidates not already covered and let call-time
     errors surface naturally.
     """
-    if not _BOTO3_AVAILABLE:
+    if not _boto3_available:
         return []
     if not AWS_ACCESS_KEY_ID or not AWS_SECRET_ACCESS_KEY:
         log.info("AWS credentials not configured — BR | models unavailable")
@@ -636,10 +640,10 @@ def _bedrock_messages_to_converse(
     The Bedrock converse API keeps system prompts separate from the message list.
     """
     system_prompt = ""
-    converse_messages = []
+    converse_messages: list[dict[str, object]] = []
     for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
+        role = str(m.get("role", "user"))
+        content = str(m.get("content", ""))
         if role == "system":
             system_prompt = content
         else:
@@ -959,7 +963,7 @@ def _probe_chat_model(
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
-                **extra_headers,
+                **(extra_headers or {}),
             },
             json={
                 "model": sdk_name,
@@ -1167,9 +1171,9 @@ if _get_copilot_token():
     _rebuild_catalogue(existing_gh_models=_initial_gh_models)
 else:
     # No Copilot token yet — start with GH | + BR | models.
-    _gh_sdk_names = {str(m["sdk_name"]) for m in _initial_gh_models}
+    _gh_sdk_names: set[str] = {str(m["sdk_name"]) for m in _initial_gh_models}
     _br_models = _build_bedrock_catalogue(_gh_sdk_names)
-    GITHUB_MODELS = _initial_gh_models + _br_models  # type: ignore[assignment]
+    GITHUB_MODELS = _initial_gh_models + _br_models  # type: ignore[assignment,operator]
     GITHUB_MODEL_MAP = {str(m["name"]): m for m in GITHUB_MODELS}  # type: ignore[assignment]
 
 
@@ -1277,7 +1281,7 @@ def get_sdk_name(name: str) -> str:
     canonical = _canonical_gh_name(name)
     entry = GITHUB_MODEL_MAP.get(canonical)
     if entry:
-        sdk = entry["sdk_name"]
+        sdk = str(entry["sdk_name"])
         log.debug("get_sdk_name(%r) -> canonical=%r sdk_name=%r", name, canonical, sdk)
         return sdk
     # Fallback: strip prefix so we at least send the bare model name
@@ -1407,8 +1411,8 @@ def _ollama_messages_to_sdk(messages: list[dict[str, object]]):
     """Convert Ollama-style message dicts to azure-ai-inference message objects."""
     result = []
     for m in messages:
-        role = m.get("role", "user")
-        content = m.get("content", "")
+        role = str(m.get("role", "user"))
+        content = str(m.get("content", ""))
         if role == "system":
             result.append(SystemMessage(content))
         elif role == "assistant":
@@ -1532,12 +1536,13 @@ def _github_generate_blocking(
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": prompt})
 
-    chat_result = _github_chat_blocking(model_name, messages)
+    chat_result: dict[str, object] = _github_chat_blocking(model_name, messages)
 
+    chat_msg2 = cast("dict[str, object]", chat_result["message"])
     return {
         "model": model_name,
         "created_at": chat_result["created_at"],
-        "response": chat_result["message"]["content"],
+        "response": chat_msg2["content"],
         "done": True,
         "done_reason": chat_result.get("done_reason", "stop"),
         "total_duration": 0,
@@ -1629,15 +1634,16 @@ def show():
             if token_kind == "copilot"
             else "GitHub Models"
         )
+        entry_details = cast("dict[str, object]", entry["details"])
         details = {
             "format": "api",
-            "family": entry["details"].get("family", token_kind),
-            "families": [entry["details"].get("family", token_kind)],
-            "parameter_size": entry["details"].get("parameter_size", "unknown"),
+            "family": entry_details.get("family", token_kind),
+            "families": [entry_details.get("family", token_kind)],
+            "parameter_size": entry_details.get("parameter_size", "unknown"),
             "quantization_level": "none",
         }
         if kind == "embed":
-            dims = entry["details"].get("dimensions", 0)
+            dims = entry_details.get("dimensions", 0)
             if dims:
                 details["dimensions"] = dims
         return jsonify(
@@ -1689,12 +1695,10 @@ def chat():
     if is_any_embed_model(model_name):
         return jsonify(
             {
-                {
-                    "error": (
-                        f"'{model_name}' is an embedding model. "
-                        "Use /api/embeddings or /api/embed instead."
-                    )
-                }
+                "error": (
+                    f"'{model_name}' is an embedding model. "
+                    "Use /api/embeddings or /api/embed instead."
+                )
             }
         ), 400
 
@@ -1767,12 +1771,10 @@ def generate():
     if is_any_embed_model(model_name):
         return jsonify(
             {
-                {
-                    "error": (
-                        f"'{model_name}' is an embedding model. "
-                        "Use /api/embeddings or /api/embed instead."
-                    )
-                }
+                "error": (
+                    f"'{model_name}' is an embedding model. "
+                    "Use /api/embeddings or /api/embed instead."
+                )
             }
         ), 400
 
@@ -1798,11 +1800,12 @@ def generate():
             if "error" in chat_result:
                 return jsonify(chat_result), 502
             # Convert chat response to generate format
+            chat_msg = cast("dict[str, object]", chat_result["message"])
             return jsonify(
                 {
                     "model": model_name,
                     "created_at": chat_result["created_at"],
-                    "response": chat_result["message"]["content"],
+                    "response": chat_msg["content"],
                     "done": True,
                     "done_reason": chat_result.get("done_reason", "stop"),
                     "total_duration": 0,
@@ -1897,9 +1900,8 @@ def chat_completions():
                 "usage": {
                     "prompt_tokens": result.get("prompt_eval_count", 0),
                     "completion_tokens": result.get("eval_count", 0),
-                    "total_tokens": (
-                        result.get("prompt_eval_count", 0) + result.get("eval_count", 0)
-                    ),
+                    "total_tokens": cast(int, result.get("prompt_eval_count", 0))
+                    + cast(int, result.get("eval_count", 0)),
                 },
             }
         )
@@ -1999,18 +2001,19 @@ def _handle_embed_request(model_name: str, data: dict[str, object]):
             return jsonify(result), 502
         # Return Ollama-compatible shape: single "embedding" for one input,
         # "embeddings" list for multiple.
+        embeddings_list = cast("list[list[float]]", result["embeddings"])
         if len(inputs) == 1:
             return jsonify(
                 {
                     "model": model_name,
-                    "embedding": result["embeddings"][0],
-                    "embeddings": result["embeddings"],
+                    "embedding": embeddings_list[0],
+                    "embeddings": embeddings_list,
                 }
             )
         return jsonify(
             {
                 "model": model_name,
-                "embeddings": result["embeddings"],
+                "embeddings": embeddings_list,
             }
         )
 
@@ -2204,11 +2207,12 @@ def _poll_device_flow() -> None:
     """Background thread: poll GitHub until the user approves or the code expires."""
     global _pending_device_flow
     flow = _pending_device_flow
-    interval = flow["interval"]
 
     log.info("Device flow polling started")
-    while time.time() < flow["expires_at"]:
-        time.sleep(interval)
+    expires_at = float(cast(float, flow["expires_at"]))
+    poll_interval = float(cast(float, flow["interval"]))
+    while time.time() < expires_at:
+        time.sleep(poll_interval)
         try:
             r = requests.post(
                 "https://github.com/login/oauth/access_token",
@@ -2227,17 +2231,19 @@ def _poll_device_flow() -> None:
             continue
 
         if "access_token" in data:
-            token = data["access_token"]
+            token = str(data["access_token"])
             _set_copilot_token(token)
             _pending_device_flow = {}
             log.info("Copilot OAuth token obtained — rebuilding model catalogue")
             # Reuse the already-discovered GH | models so we don't re-probe them.
-            existing_gh = [m for m in GITHUB_MODELS if m["name"].startswith(GH_PREFIX)]
+            existing_gh = [
+                m for m in GITHUB_MODELS if str(m["name"]).startswith(GH_PREFIX)
+            ]
             _rebuild_catalogue(existing_gh_models=existing_gh if existing_gh else None)
             return
-        elif data.get("error") == "slow_down":
-            interval += 5
-        elif data.get("error") == "authorization_pending":
+        elif str(data.get("error", "")) == "slow_down":
+            poll_interval += 5
+        elif str(data.get("error", "")) == "authorization_pending":
             pass
         else:
             log.warning("Device flow ended: %s", data.get("error", data))
@@ -2598,8 +2604,8 @@ def v1_chat_completions():
                 "usage": {
                     "prompt_tokens": result.get("prompt_eval_count", 0),
                     "completion_tokens": result.get("eval_count", 0),
-                    "total_tokens": result.get("prompt_eval_count", 0)
-                    + result.get("eval_count", 0),
+                    "total_tokens": cast(int, result.get("prompt_eval_count", 0))
+                    + cast(int, result.get("eval_count", 0)),
                 },
             }
         )
@@ -2647,8 +2653,8 @@ def v1_chat_completions():
                 "usage": {
                     "prompt_tokens": result.get("prompt_eval_count", 0),
                     "completion_tokens": result.get("eval_count", 0),
-                    "total_tokens": result.get("prompt_eval_count", 0)
-                    + result.get("eval_count", 0),
+                    "total_tokens": cast(int, result.get("prompt_eval_count", 0))
+                    + cast(int, result.get("eval_count", 0)),
                 },
             }
         )
