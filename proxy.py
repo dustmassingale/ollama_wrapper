@@ -2574,6 +2574,14 @@ def _github_chat_streaming_openai(model_name: str, messages: list[dict[str, obje
         client.close()
 
 
+@app.route("/v1/completions", methods=["POST"])
+def v1_completions():
+    """Compatibility alias for older clients: forward to /v1/chat/completions handler."""
+    # This simply delegates to the main chat/completions handler so both endpoints
+    # behave identically.
+    return v1_chat_completions()
+
+
 @app.route("/v1/chat/completions", methods=["POST"])
 def v1_chat_completions():
     """OpenAI-compat POST /v1/chat/completions — routes to GitHub or remote Ollama."""
