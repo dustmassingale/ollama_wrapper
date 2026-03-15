@@ -54,147 +54,118 @@ GITHUB_TOKEN_COPILOT = os.getenv("GITHUB_TOKEN_COPILOT", "")
 GITHUB_INFERENCE_ENDPOINT = "https://models.inference.ai.azure.com"
 
 # ---------------------------------------------------------------------------
-# GitHub model catalogue
+# Model discovery
 #
-# "name"     — the display name exposed to Ollama clients (e.g. Continue.dev)
-#              Always carries the "GH | " prefix so clients can distinguish them.
-# "sdk_name" — the model identifier accepted by the GitHub inference endpoint
-# "token"    — which env token to use: "standard" (GITHUB_TOKEN) or
-#              "copilot" (GITHUB_TOKEN_COPILOT)
+# On startup we query the live /models endpoint for each configured token and
+# build the catalogue dynamically. The hardcoded list below is only used as a
+# fallback when the discovery request fails (e.g. no network, bad token).
+# ---------------------------------------------------------------------------
+
+_FALLBACK_STANDARD = [
+    {"sdk_name": "gpt-4o", "family": "gpt", "size": "unknown"},
+    {"sdk_name": "gpt-4o-mini", "family": "gpt", "size": "unknown"},
+    {"sdk_name": "gpt-4.1", "family": "gpt", "size": "unknown"},
+    {"sdk_name": "gpt-4.1-mini", "family": "gpt", "size": "unknown"},
+    {"sdk_name": "Meta-Llama-3.1-405B-Instruct", "family": "llama", "size": "405B"},
+    {"sdk_name": "Meta-Llama-3.1-8B-Instruct", "family": "llama", "size": "8B"},
+]
+
+_FALLBACK_COPILOT: list[dict] = []  # nothing confirmed yet; populated by discovery
+
+
+def _discover_models(token: str, prefix: str, token_label: str) -> list[dict]:
+    """
+    Query the GitHub Models catalogue endpoint and return a list of proxy
+    model entries. Falls back to the hardcoded list on any error.
+    """
+    if not token:
+        return []
+
+    fallback = _FALLBACK_STANDARD if token_label == "standard" else _FALLBACK_COPILOT
+
+    try:
+        resp = requests.get(
+            f"{GITHUB_INFERENCE_ENDPOINT}/models",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        raw_models = resp.json()
+
+        # Filter to chat-capable models only (skip embedding models)
+        EMBEDDING_KEYWORDS = {"embed", "embedding"}
+        chat_models = [
+            m
+            for m in raw_models
+            if not any(kw in m.get("name", "").lower() for kw in EMBEDDING_KEYWORDS)
+        ]
+
+        entries = []
+        for m in chat_models:
+            sdk_name = m.get("name", "")
+            if not sdk_name:
+                continue
+            entries.append(
+                {
+                    "name": f"{prefix}{sdk_name}",
+                    "sdk_name": sdk_name,
+                    "token": token_label,
+                    "size": 0,
+                    "modified_at": "2024-01-01T00:00:00Z",
+                    "details": {
+                        "family": sdk_name.split("-")[0].lower(),
+                        "parameter_size": "unknown",
+                    },
+                }
+            )
+
+        log.info(
+            "Discovered %d chat models for %s token (prefix '%s')",
+            len(entries),
+            token_label,
+            prefix,
+        )
+        return entries
+
+    except Exception as e:
+        log.warning(
+            "Model discovery failed for %s token (%s) — using fallback catalogue",
+            token_label,
+            e,
+        )
+        return [
+            {
+                "name": f"{prefix}{f['sdk_name']}",
+                "sdk_name": f["sdk_name"],
+                "token": token_label,
+                "size": 0,
+                "modified_at": "2024-01-01T00:00:00Z",
+                "details": {"family": f["family"], "parameter_size": f["size"]},
+            }
+            for f in fallback
+        ]
+
+
+# ---------------------------------------------------------------------------
+# GitHub model catalogue — built at startup via live API discovery
 # ---------------------------------------------------------------------------
 
 GH_PREFIX = "GH | "
 GC_PREFIX = "GC | "
 REMOTE_PREFIX = "155 | "
 
-# Standard-tier: confirmed working with a regular GitHub PAT (GITHUB_TOKEN).
-# Copilot-tier:  requires a Copilot Pro/Business/Enterprise token (GITHUB_TOKEN_COPILOT).
-# To discover which models your token can access:
-#   GET https://models.inference.ai.azure.com/models  (with your Authorization header)
-GITHUB_MODELS = [
-    # ------------------------------------------------------------------
-    # Standard PAT models (GITHUB_TOKEN)
-    # ------------------------------------------------------------------
-    {
-        "name": "GH | gpt-4o",
-        "sdk_name": "gpt-4o",
-        "token": "standard",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "gpt", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GH | gpt-4o-mini",
-        "sdk_name": "gpt-4o-mini",
-        "token": "standard",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "gpt", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GH | gpt-4.1",
-        "sdk_name": "gpt-4.1",
-        "token": "standard",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "gpt", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GH | gpt-4.1-mini",
-        "sdk_name": "gpt-4.1-mini",
-        "token": "standard",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "gpt", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GH | Meta-Llama-3.1-405B-Instruct",
-        "sdk_name": "Meta-Llama-3.1-405B-Instruct",
-        "token": "standard",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "llama", "parameter_size": "405B"},
-    },
-    {
-        "name": "GH | Meta-Llama-3.1-8B-Instruct",
-        "sdk_name": "Meta-Llama-3.1-8B-Instruct",
-        "token": "standard",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "llama", "parameter_size": "8B"},
-    },
-    # ------------------------------------------------------------------
-    # Copilot-tier models (GITHUB_TOKEN_COPILOT)
-    # Requires Copilot Pro / Business / Enterprise subscription.
-    # These entries are only surfaced in /api/tags and /v1/models when
-    # GITHUB_TOKEN_COPILOT is set; they are skipped otherwise.
-    # ------------------------------------------------------------------
-    {
-        "name": "GC | claude-haiku-4-5",
-        "sdk_name": "claude-haiku-4-5",
-        "token": "copilot",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "claude", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GC | claude-sonnet-4-5",
-        "sdk_name": "claude-sonnet-4-5",
-        "token": "copilot",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "claude", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GC | claude-opus-4-5",
-        "sdk_name": "claude-opus-4-5",
-        "token": "copilot",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "claude", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GC | gemini-2.0-flash",
-        "sdk_name": "gemini-2.0-flash",
-        "token": "copilot",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "gemini", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GC | grok-3",
-        "sdk_name": "grok-3",
-        "token": "copilot",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "grok", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GC | grok-3-mini",
-        "sdk_name": "grok-3-mini",
-        "token": "copilot",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "grok", "parameter_size": "unknown"},
-    },
-]
+# Populated at module load time by querying the live /models endpoint.
+GITHUB_MODELS: list[dict] = _discover_models(
+    GITHUB_TOKEN, GH_PREFIX, "standard"
+) + _discover_models(GITHUB_TOKEN_COPILOT, GC_PREFIX, "copilot")
 
 # Fast lookup: display name -> catalogue entry
-# Copilot-tier entries are always included in the map (for routing), but are
-# filtered out of public listings when GITHUB_TOKEN_COPILOT is not set.
 GITHUB_MODEL_MAP: dict[str, dict] = {m["name"]: m for m in GITHUB_MODELS}
 
 
 def _active_github_models() -> list[dict]:
-    """Return only the models whose required token is currently configured."""
-    result = []
-    for m in GITHUB_MODELS:
-        if m["token"] == "copilot" and not GITHUB_TOKEN_COPILOT:
-            continue
-        if m["token"] == "standard" and not GITHUB_TOKEN:
-            continue
-        result.append(m)
-    return result
+    """Return all discovered models (discovery already filtered by token availability)."""
+    return GITHUB_MODELS
 
 
 def _token_for_model(name: str) -> str:
