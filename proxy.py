@@ -154,10 +154,39 @@ GH_PREFIX = "GH | "
 GC_PREFIX = "GC | "
 REMOTE_PREFIX = "155 | "
 
+
 # Populated at module load time by querying the live /models endpoint.
-GITHUB_MODELS: list[dict] = _discover_models(
-    GITHUB_TOKEN, GH_PREFIX, "standard"
-) + _discover_models(GITHUB_TOKEN_COPILOT, GC_PREFIX, "copilot")
+# If both tokens resolve to the same sdk_names, only the standard-tier
+# (GH |) entries are kept to avoid showing duplicate models.
+def _build_github_models() -> list[dict]:
+    standard = _discover_models(GITHUB_TOKEN, GH_PREFIX, "standard")
+    copilot = _discover_models(GITHUB_TOKEN_COPILOT, GC_PREFIX, "copilot")
+
+    if not copilot:
+        return standard
+
+    standard_sdk_names = {m["sdk_name"] for m in standard}
+    copilot_sdk_names = {m["sdk_name"] for m in copilot}
+
+    if standard_sdk_names == copilot_sdk_names:
+        log.info(
+            "Both tokens return identical model sets — "
+            "suppressing GC | duplicates. "
+            "GITHUB_TOKEN_COPILOT may be the same account as GITHUB_TOKEN."
+        )
+        return standard
+
+    # Only include copilot entries that aren't already in the standard set
+    unique_copilot = [m for m in copilot if m["sdk_name"] not in standard_sdk_names]
+    if len(unique_copilot) < len(copilot):
+        log.info(
+            "Suppressed %d GC | models already present under GH | prefix",
+            len(copilot) - len(unique_copilot),
+        )
+    return standard + unique_copilot
+
+
+GITHUB_MODELS: list[dict] = _build_github_models()
 
 # Fast lookup: display name -> catalogue entry
 GITHUB_MODEL_MAP: dict[str, dict] = {m["name"]: m for m in GITHUB_MODELS}
