@@ -1172,6 +1172,7 @@ def _discover_models(
 GH_PREFIX = "GH | "
 GC_PREFIX = "GC | "
 REMOTE_PREFIX = "OL | "
+LEGACY_REMOTE_PREFIX = "155 | "
 # BR_PREFIX is defined earlier alongside Bedrock config
 
 # Populated at module load time; rebuilt after Copilot login via _rebuild_catalogue().
