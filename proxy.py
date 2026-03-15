@@ -1,15 +1,28 @@
 """
-Simple Ollama Proxy Server with GitHub Models for Copilot
-Routes requests to 192.168.1.155 and adds GitHub models
+Ollama Proxy Server with real GitHub Models support.
+
+- Ollama API requests are proxied to the remote server at REMOTE_OLLAMA_URL.
+- GitHub model requests are fulfilled via the azure-ai-inference SDK against
+  https://models.inference.ai.azure.com using a GITHUB_TOKEN env var.
+- Responses are translated into Ollama-format NDJSON so any Ollama client
+  (Continue.dev, Open WebUI, etc.) works transparently.
 """
 
 import json
 import logging
+import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
+from azure.ai.inference import ChatCompletionsClient
+from azure.ai.inference.models import AssistantMessage, SystemMessage, UserMessage
+from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import HttpResponseError
+from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, stream_with_context
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -22,85 +35,134 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Silence the very noisy azure-core HTTP logger unless you want it
+logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(
+    logging.WARNING
+)
+
 app = Flask(__name__)
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
-REMOTE_OLLAMA_URL = "http://192.168.1.155:11434"
-PORT = 5000
+REMOTE_OLLAMA_URL = os.getenv("REMOTE_OLLAMA_URL", "http://192.168.1.155:11434")
+PORT = int(os.getenv("PORT", "5000"))
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_INFERENCE_ENDPOINT = "https://models.inference.ai.azure.com"
 
 # ---------------------------------------------------------------------------
-# GitHub / Copilot model catalogue
+# GitHub model catalogue
+#
+# "name"     — the display name exposed to Ollama clients (e.g. Continue.dev)
+#              Always carries the "GH | " prefix so clients can distinguish them.
+# "sdk_name" — the model identifier accepted by the GitHub inference endpoint
 # ---------------------------------------------------------------------------
+
+GH_PREFIX = "GH | "
+REMOTE_PREFIX = "155 | "
 
 GITHUB_MODELS = [
     {
-        "name": "gpt-5-mini",
+        "name": "GH | gpt-4o-mini",
+        "sdk_name": "gpt-4o-mini",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {},
+        "details": {"family": "gpt", "parameter_size": "unknown"},
     },
     {
-        "name": "claude-haiku-4.5",
+        "name": "GH | claude-haiku-4-5",
+        "sdk_name": "claude-haiku-4-5",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {},
+        "details": {"family": "claude", "parameter_size": "unknown"},
     },
     {
-        "name": "claude-opus-4.6",
+        "name": "GH | claude-opus-4-5",
+        "sdk_name": "claude-opus-4-5",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {},
+        "details": {"family": "claude", "parameter_size": "unknown"},
     },
     {
-        "name": "claude-sonnet-4.6",
+        "name": "GH | claude-sonnet-4-5",
+        "sdk_name": "claude-sonnet-4-5",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {},
+        "details": {"family": "claude", "parameter_size": "unknown"},
     },
     {
-        "name": "gemini-3-flash",
+        "name": "GH | gemini-2.0-flash",
+        "sdk_name": "gemini-2.0-flash",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {},
+        "details": {"family": "gemini", "parameter_size": "unknown"},
     },
     {
-        "name": "gemini-3.1-pro",
+        "name": "GH | gemini-2.0-flash-thinking-exp",
+        "sdk_name": "gemini-2.0-flash-thinking-exp",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {},
+        "details": {"family": "gemini", "parameter_size": "unknown"},
     },
     {
-        "name": "gpt-5.3-codex",
+        "name": "GH | gpt-4.1",
+        "sdk_name": "gpt-4.1",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {},
+        "details": {"family": "gpt", "parameter_size": "unknown"},
     },
     {
-        "name": "gpt-5.4",
+        "name": "GH | gpt-4.1-mini",
+        "sdk_name": "gpt-4.1-mini",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {},
+        "details": {"family": "gpt", "parameter_size": "unknown"},
     },
     {
-        "name": "grok-code-fast-1",
+        "name": "GH | grok-3",
+        "sdk_name": "grok-3",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {},
+        "details": {"family": "grok", "parameter_size": "unknown"},
+    },
+    {
+        "name": "GH | grok-3-mini",
+        "sdk_name": "grok-3-mini",
+        "size": 0,
+        "modified_at": "2024-01-01T00:00:00Z",
+        "details": {"family": "grok", "parameter_size": "unknown"},
     },
 ]
 
-GITHUB_MODEL_NAMES = {m["name"] for m in GITHUB_MODELS}
+# Fast lookup: display name -> catalogue entry
+GITHUB_MODEL_MAP: dict[str, dict] = {m["name"]: m for m in GITHUB_MODELS}
 
 
 def is_github_model(name: str) -> bool:
-    return name in GITHUB_MODEL_NAMES
+    """Accept both prefixed ('GH | foo') and bare ('foo') names."""
+    return name in GITHUB_MODEL_MAP or (GH_PREFIX + name) in GITHUB_MODEL_MAP
+
+
+def _canonical_gh_name(name: str) -> str:
+    """Return the prefixed display name regardless of whether the prefix was supplied."""
+    if name in GITHUB_MODEL_MAP:
+        return name
+    prefixed = GH_PREFIX + name
+    if prefixed in GITHUB_MODEL_MAP:
+        return prefixed
+    return name
+
+
+def get_sdk_name(name: str) -> str:
+    """Return the GitHub inference endpoint model ID for a display name."""
+    entry = GITHUB_MODEL_MAP.get(_canonical_gh_name(name))
+    return entry["sdk_name"] if entry else name
 
 
 # ---------------------------------------------------------------------------
-# Global error handlers — always return JSON, never HTML
+# Global Flask error handlers — always JSON, never HTML
 # ---------------------------------------------------------------------------
 
 
@@ -128,7 +190,7 @@ def unhandled(e):
 
 
 def now_iso() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def proxy_request(method: str, path: str, data=None, params=None, stream: bool = False):
@@ -149,7 +211,7 @@ def proxy_request(method: str, path: str, data=None, params=None, stream: bool =
 
 
 def stream_chunks(upstream_response):
-    """Yield raw bytes from an upstream streaming response."""
+    """Yield raw bytes from an upstream streaming requests.Response."""
     for chunk in upstream_response.iter_content(chunk_size=None):
         if chunk:
             yield chunk
@@ -158,7 +220,6 @@ def stream_chunks(upstream_response):
 def make_proxy_response(
     resp, default_content_type: str = "application/json"
 ) -> Response:
-    """Wrap an upstream requests.Response into a Flask Response."""
     return Response(
         resp.content,
         status=resp.status_code,
@@ -169,12 +230,194 @@ def make_proxy_response(
 def make_streaming_proxy_response(
     resp, default_content_type: str = "application/x-ndjson"
 ) -> Response:
-    """Wrap an upstream streaming requests.Response into a Flask streaming Response."""
     return Response(
         stream_with_context(stream_chunks(resp)),
         status=resp.status_code,
         content_type=resp.headers.get("Content-Type", default_content_type),
     )
+
+
+# ---------------------------------------------------------------------------
+# GitHub SDK helpers
+# ---------------------------------------------------------------------------
+
+
+def _build_github_client() -> ChatCompletionsClient:
+    if not GITHUB_TOKEN:
+        raise RuntimeError(
+            "GITHUB_TOKEN is not set. Add it to your .env file or environment."
+        )
+    return ChatCompletionsClient(
+        endpoint=GITHUB_INFERENCE_ENDPOINT,
+        credential=AzureKeyCredential(GITHUB_TOKEN),
+    )
+
+
+def _ollama_messages_to_sdk(messages: list[dict]):
+    """Convert Ollama-style message dicts to azure-ai-inference message objects."""
+    result = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content", "")
+        if role == "system":
+            result.append(SystemMessage(content))
+        elif role == "assistant":
+            result.append(AssistantMessage(content))
+        else:
+            result.append(UserMessage(content))
+    return result
+
+
+def _github_chat_streaming(model_name: str, messages: list[dict]):
+    """
+    Call GitHub Models via the SDK with stream=True and yield Ollama-format
+    NDJSON lines. Each delta becomes one line; a final done=True line closes
+    the stream.
+    """
+    sdk_name = get_sdk_name(model_name)
+    sdk_messages = _ollama_messages_to_sdk(messages)
+    client = _build_github_client()
+
+    try:
+        response = client.complete(
+            model=sdk_name,
+            messages=sdk_messages,
+            stream=True,
+        )
+
+        for update in response:
+            if not update.choices:
+                continue
+            delta = update.choices[0].delta
+            content = delta.content if delta and delta.content else ""
+            finish_reason = update.choices[0].finish_reason
+
+            is_done = finish_reason is not None
+
+            chunk = {
+                "model": model_name,
+                "created_at": now_iso(),
+                "message": {"role": "assistant", "content": content},
+                "done": is_done,
+            }
+            if is_done:
+                chunk["done_reason"] = str(finish_reason) if finish_reason else "stop"
+                chunk["total_duration"] = 0
+                chunk["load_duration"] = 0
+                chunk["prompt_eval_count"] = 0
+                chunk["eval_count"] = 0
+
+            yield json.dumps(chunk) + "\n"
+
+    except HttpResponseError as e:
+        log.error("GitHub SDK error: %s %s", e.status_code, e.message)
+        error_chunk = {
+            "model": model_name,
+            "created_at": now_iso(),
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+            "done_reason": "error",
+            "error": f"{e.status_code}: {e.message}",
+        }
+        yield json.dumps(error_chunk) + "\n"
+    finally:
+        client.close()
+
+
+def _github_chat_blocking(model_name: str, messages: list[dict]) -> dict:
+    """
+    Call GitHub Models via the SDK with stream=False and return a single
+    Ollama-format response dict.
+    """
+    sdk_name = get_sdk_name(model_name)
+    sdk_messages = _ollama_messages_to_sdk(messages)
+    client = _build_github_client()
+
+    try:
+        response = client.complete(
+            model=sdk_name,
+            messages=sdk_messages,
+            stream=False,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        usage = response.usage
+
+        return {
+            "model": model_name,
+            "created_at": now_iso(),
+            "message": {"role": "assistant", "content": content},
+            "done": True,
+            "done_reason": "stop",
+            "total_duration": 0,
+            "load_duration": 0,
+            "prompt_eval_count": usage.prompt_tokens if usage else 0,
+            "eval_count": usage.completion_tokens if usage else 0,
+        }
+
+    except HttpResponseError as e:
+        log.error("GitHub SDK error: %s %s", e.status_code, e.message)
+        return {
+            "model": model_name,
+            "created_at": now_iso(),
+            "message": {"role": "assistant", "content": ""},
+            "done": True,
+            "done_reason": "error",
+            "error": f"{e.status_code}: {e.message}",
+        }
+    finally:
+        client.close()
+
+
+def _github_generate_blocking(model_name: str, prompt: str, system: str = "") -> dict:
+    """
+    Wrap a plain /api/generate prompt as a chat call to GitHub Models
+    and return an Ollama /api/generate-format response dict.
+    """
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    chat_result = _github_chat_blocking(model_name, messages)
+
+    return {
+        "model": model_name,
+        "created_at": chat_result["created_at"],
+        "response": chat_result["message"]["content"],
+        "done": True,
+        "done_reason": chat_result.get("done_reason", "stop"),
+        "total_duration": 0,
+        "load_duration": 0,
+        "prompt_eval_count": chat_result.get("prompt_eval_count", 0),
+        "eval_count": chat_result.get("eval_count", 0),
+    }
+
+
+def _github_generate_streaming(model_name: str, prompt: str, system: str = ""):
+    """
+    Wrap a plain /api/generate prompt as a streaming chat call and yield
+    Ollama /api/generate-format NDJSON lines.
+    """
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
+    for chat_line in _github_chat_streaming(model_name, messages):
+        chat_chunk = json.loads(chat_line)
+        gen_chunk = {
+            "model": model_name,
+            "created_at": chat_chunk["created_at"],
+            "response": chat_chunk.get("message", {}).get("content", ""),
+            "done": chat_chunk["done"],
+        }
+        if chat_chunk["done"]:
+            gen_chunk["done_reason"] = chat_chunk.get("done_reason", "stop")
+            gen_chunk["total_duration"] = 0
+            gen_chunk["load_duration"] = 0
+            gen_chunk["prompt_eval_count"] = chat_chunk.get("prompt_eval_count", 0)
+            gen_chunk["eval_count"] = chat_chunk.get("eval_count", 0)
+        yield json.dumps(gen_chunk) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +436,16 @@ def get_tags():
         log.warning("Could not reach remote Ollama: %s", e)
         remote_models = []
 
-    return jsonify({"models": remote_models + GITHUB_MODELS})
+    # Prefix each remote Ollama model name with "155 | "
+    for m in remote_models:
+        if not m.get("name", "").startswith(REMOTE_PREFIX):
+            m["name"] = REMOTE_PREFIX + m["name"]
+
+    # Strip sdk_name from the catalogue before sending to clients
+    github_entries = [
+        {k: v for k, v in m.items() if k != "sdk_name"} for m in GITHUB_MODELS
+    ]
+    return jsonify({"models": remote_models + github_entries})
 
 
 # ---------------------------------------------------------------------------
@@ -209,18 +461,19 @@ def show():
     log.debug("/api/show model=%r", model_name)
 
     if is_github_model(model_name):
+        entry = GITHUB_MODEL_MAP[_canonical_gh_name(model_name)]
         return jsonify(
             {
                 "license": "",
-                "modelfile": f"# GitHub / Copilot model: {model_name}",
+                "modelfile": f"# GitHub Models via azure-ai-inference: {model_name}",
                 "parameters": "",
                 "template": "{{ .Prompt }}",
                 "details": {
-                    "format": "gguf",
-                    "family": "github",
-                    "families": ["github"],
-                    "parameter_size": "unknown",
-                    "quantization_level": "unknown",
+                    "format": "api",
+                    "family": entry["details"].get("family", "github"),
+                    "families": [entry["details"].get("family", "github")],
+                    "parameter_size": entry["details"].get("parameter_size", "unknown"),
+                    "quantization_level": "none",
                 },
                 "model_info": {},
             }
@@ -235,45 +488,42 @@ def show():
 # ---------------------------------------------------------------------------
 
 
-def _github_chat_payload(model_name: str) -> dict:
-    return {
-        "model": model_name,
-        "created_at": now_iso(),
-        "message": {
-            "role": "assistant",
-            "content": (
-                f"'{model_name}' is listed in this proxy's model catalogue "
-                "but is not yet connected to a live backend. "
-                "Please configure a real endpoint for this model."
-            ),
-        },
-        "done": True,
-        "done_reason": "stop",
-        "total_duration": 0,
-        "load_duration": 0,
-        "prompt_eval_count": 0,
-        "eval_count": 0,
-    }
-
-
 @app.route("/api/chat", methods=["POST"])
 def chat():
-    """Ollama /api/chat — proxy to remote or return synthetic GitHub response."""
+    """Ollama /api/chat — real GitHub SDK call or proxy to remote Ollama."""
     data = request.json or {}
     model_name = data.get("model", "")
-    # Continue.dev and most clients send "stream": true by default for /api/chat
     do_stream = data.get("stream", True)
-    log.debug("/api/chat model=%r stream=%s", model_name, do_stream)
+    messages = data.get("messages", [])
+    log.debug(
+        "/api/chat model=%r stream=%s msgs=%d", model_name, do_stream, len(messages)
+    )
+
+    # Strip "155 | " prefix and forward to remote Ollama
+    if model_name.startswith(REMOTE_PREFIX):
+        data["model"] = model_name[len(REMOTE_PREFIX) :]
+        resp = proxy_request("POST", "/api/chat", data=data, stream=do_stream)
+        if do_stream:
+            return make_streaming_proxy_response(resp, "application/x-ndjson")
+        return make_proxy_response(resp)
 
     if is_github_model(model_name):
-        payload = _github_chat_payload(model_name)
+        model_name = _canonical_gh_name(model_name)
+        if not GITHUB_TOKEN:
+            err = {"error": "GITHUB_TOKEN is not configured on the proxy server."}
+            return jsonify(err), 500
+
         if do_stream:
-            # Streaming NDJSON: single line then done
-            body = json.dumps(payload) + "\n"
+            return Response(
+                stream_with_context(_github_chat_streaming(model_name, messages)),
+                status=200,
+                content_type="application/x-ndjson",
+            )
         else:
-            # Non-streaming: plain JSON object
-            body = json.dumps(payload)
-        return Response(body, status=200, content_type="application/json")
+            result = _github_chat_blocking(model_name, messages)
+            if "error" in result:
+                return jsonify(result), 502
+            return jsonify(result)
 
     resp = proxy_request("POST", "/api/chat", data=data, stream=do_stream)
     if do_stream:
@@ -286,39 +536,43 @@ def chat():
 # ---------------------------------------------------------------------------
 
 
-def _github_generate_payload(model_name: str) -> dict:
-    return {
-        "model": model_name,
-        "created_at": now_iso(),
-        "response": (
-            f"'{model_name}' is listed in this proxy's model catalogue "
-            "but is not yet connected to a live backend. "
-            "Please configure a real endpoint for this model."
-        ),
-        "done": True,
-        "done_reason": "stop",
-        "total_duration": 0,
-        "load_duration": 0,
-        "prompt_eval_count": 0,
-        "eval_count": 0,
-    }
-
-
 @app.route("/api/generate", methods=["POST"])
 def generate():
-    """Ollama /api/generate — proxy to remote or return synthetic GitHub response."""
+    """Ollama /api/generate — real GitHub SDK call or proxy to remote Ollama."""
     data = request.json or {}
     model_name = data.get("model", "")
     do_stream = data.get("stream", True)
+    prompt = data.get("prompt", "")
+    system = data.get("system", "")
     log.debug("/api/generate model=%r stream=%s", model_name, do_stream)
 
-    if is_github_model(model_name):
-        payload = _github_generate_payload(model_name)
+    # Strip "155 | " prefix and forward to remote Ollama
+    if model_name.startswith(REMOTE_PREFIX):
+        data["model"] = model_name[len(REMOTE_PREFIX) :]
+        resp = proxy_request("POST", "/api/generate", data=data, stream=do_stream)
         if do_stream:
-            body = json.dumps(payload) + "\n"
+            return make_streaming_proxy_response(resp, "application/x-ndjson")
+        return make_proxy_response(resp)
+
+    if is_github_model(model_name):
+        model_name = _canonical_gh_name(model_name)
+        if not GITHUB_TOKEN:
+            err = {"error": "GITHUB_TOKEN is not configured on the proxy server."}
+            return jsonify(err), 500
+
+        if do_stream:
+            return Response(
+                stream_with_context(
+                    _github_generate_streaming(model_name, prompt, system)
+                ),
+                status=200,
+                content_type="application/x-ndjson",
+            )
         else:
-            body = json.dumps(payload)
-        return Response(body, status=200, content_type="application/json")
+            result = _github_generate_blocking(model_name, prompt, system)
+            if "error" in result:
+                return jsonify(result), 502
+            return jsonify(result)
 
     resp = proxy_request("POST", "/api/generate", data=data, stream=do_stream)
     if do_stream:
@@ -327,7 +581,7 @@ def generate():
 
 
 # ---------------------------------------------------------------------------
-# /api/chat/completions  (OpenAI-compat)
+# /api/chat/completions  (OpenAI-compat pass-through)
 # ---------------------------------------------------------------------------
 
 
@@ -339,30 +593,47 @@ def chat_completions():
     do_stream = data.get("stream", False)
     log.debug("/api/chat/completions model=%r stream=%s", model_name, do_stream)
 
+    # Strip "155 | " prefix and forward to remote Ollama
+    if model_name.startswith(REMOTE_PREFIX):
+        data["model"] = model_name[len(REMOTE_PREFIX) :]
+        resp = proxy_request(
+            "POST", "/api/chat/completions", data=data, stream=do_stream
+        )
+        if do_stream:
+            return make_streaming_proxy_response(resp, "text/event-stream")
+        return make_proxy_response(resp)
+
+    # For GitHub models, re-use the Ollama-format chat handler and wrap the
+    # result in an OpenAI-compat envelope (non-streaming only for simplicity).
     if is_github_model(model_name):
+        model_name = _canonical_gh_name(model_name)
+        if not GITHUB_TOKEN:
+            return jsonify({"error": "GITHUB_TOKEN is not configured."}), 500
+
+        messages = data.get("messages", [])
+        result = _github_chat_blocking(model_name, messages)
+        if "error" in result:
+            return jsonify(result), 502
+
         return jsonify(
             {
                 "id": "chatcmpl-github",
                 "object": "chat.completion",
-                "created": int(datetime.utcnow().timestamp()),
+                "created": int(datetime.now(timezone.utc).timestamp()),
                 "model": model_name,
                 "choices": [
                     {
                         "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": (
-                                f"'{model_name}' is listed in this proxy's model catalogue "
-                                "but is not yet connected to a live backend."
-                            ),
-                        },
-                        "finish_reason": "stop",
+                        "message": result["message"],
+                        "finish_reason": result.get("done_reason", "stop"),
                     }
                 ],
                 "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
+                    "prompt_tokens": result.get("prompt_eval_count", 0),
+                    "completion_tokens": result.get("eval_count", 0),
+                    "total_tokens": (
+                        result.get("prompt_eval_count", 0) + result.get("eval_count", 0)
+                    ),
                 },
             }
         )
@@ -374,27 +645,20 @@ def chat_completions():
 
 
 # ---------------------------------------------------------------------------
-# /api/embeddings
+# /api/embeddings  and  /api/embed
 # ---------------------------------------------------------------------------
 
 
 @app.route("/api/embeddings", methods=["POST"])
 def embeddings():
-    """Proxy embeddings requests to remote Ollama."""
     data = request.json or {}
     log.debug("/api/embeddings model=%r", data.get("model"))
     resp = proxy_request("POST", "/api/embeddings", data=data)
     return make_proxy_response(resp)
 
 
-# ---------------------------------------------------------------------------
-# /api/embed  (newer Ollama alias)
-# ---------------------------------------------------------------------------
-
-
 @app.route("/api/embed", methods=["POST"])
 def embed():
-    """Proxy /api/embed requests to remote Ollama."""
     data = request.json or {}
     log.debug("/api/embed model=%r", data.get("model"))
     resp = proxy_request("POST", "/api/embed", data=data)
@@ -408,7 +672,6 @@ def embed():
 
 @app.route("/api/pull", methods=["POST"])
 def pull():
-    """Proxy pull requests to remote Ollama (streamed progress)."""
     data = request.json or {}
     do_stream = data.get("stream", True)
     log.debug("/api/pull model=%r stream=%s", data.get("model"), do_stream)
@@ -425,7 +688,6 @@ def pull():
 
 @app.route("/api/ps", methods=["GET"])
 def ps():
-    """List running models on the remote Ollama server."""
     resp = proxy_request("GET", "/api/ps")
     return make_proxy_response(resp)
 
@@ -437,7 +699,6 @@ def ps():
 
 @app.route("/api/delete", methods=["DELETE"])
 def delete():
-    """Proxy model deletion to the remote Ollama server."""
     data = request.json or {}
     resp = proxy_request("DELETE", "/api/delete", data=data)
     return make_proxy_response(resp)
@@ -450,7 +711,6 @@ def delete():
 
 @app.route("/api/copy", methods=["POST"])
 def copy():
-    """Proxy model copy to the remote Ollama server."""
     data = request.json or {}
     resp = proxy_request("POST", "/api/copy", data=data)
     return make_proxy_response(resp)
@@ -463,39 +723,43 @@ def copy():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check endpoint."""
     try:
         resp = requests.get(f"{REMOTE_OLLAMA_URL}/api/tags", timeout=5)
         remote_status = "ok" if resp.status_code == 200 else "error"
     except Exception:
         remote_status = "error"
 
+    github_status = "ready" if GITHUB_TOKEN else "no token — set GITHUB_TOKEN"
     status = "healthy" if remote_status == "ok" else "degraded"
+
     return jsonify(
-        {"status": status, "remote_ollama": remote_status, "github_models": "available"}
+        {
+            "status": status,
+            "remote_ollama": remote_status,
+            "github_models": github_status,
+        }
     )
 
 
 @app.route("/", methods=["GET"])
 def root():
-    """Root endpoint."""
     return jsonify(
         {
             "message": "Ollama Proxy with GitHub Models",
-            "version": "1.2.0",
+            "version": "1.3.0",
             "endpoints": [
                 "GET    /api/tags             — list all models",
                 "POST   /api/show             — model metadata",
                 "POST   /api/chat             — Ollama-style chat (NDJSON)",
                 "POST   /api/generate         — Ollama-style generate (NDJSON)",
                 "POST   /api/chat/completions — OpenAI-compat chat completions",
-                "POST   /api/embeddings       — embeddings (legacy)",
+                "POST   /api/embeddings       — embeddings (legacy alias)",
                 "POST   /api/embed            — embeddings",
                 "POST   /api/pull             — pull a model",
-                "GET    /api/ps              — running models",
-                "DELETE /api/delete          — delete a model",
-                "POST   /api/copy            — copy a model",
-                "GET    /health              — health check",
+                "GET    /api/ps               — running models",
+                "DELETE /api/delete           — delete a model",
+                "POST   /api/copy             — copy a model",
+                "GET    /health               — health check",
             ],
         }
     )
@@ -507,8 +771,13 @@ def root():
 
 if __name__ == "__main__":
     log.info("Starting Ollama Proxy Server")
-    log.info("Proxying to : %s", REMOTE_OLLAMA_URL)
-    log.info("GitHub models: %d available", len(GITHUB_MODELS))
-    log.info("Listening on  http://0.0.0.0:%d", PORT)
-    # debug=False is intentional — debug mode swallows errors into HTML pages
+    log.info("Proxying Ollama to : %s", REMOTE_OLLAMA_URL)
+    log.info("GitHub Models      : %s", GITHUB_INFERENCE_ENDPOINT)
+    log.info(
+        "GitHub token       : %s",
+        "configured" if GITHUB_TOKEN else "NOT SET — GitHub models will return 500",
+    )
+    log.info("GitHub model count : %d", len(GITHUB_MODELS))
+    log.info("Listening on       : http://0.0.0.0:%d", PORT)
+    # debug=False is intentional — debug mode returns HTML error pages
     app.run(host="0.0.0.0", port=PORT, debug=False)
