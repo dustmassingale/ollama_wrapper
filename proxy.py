@@ -408,9 +408,9 @@ def _set_copilot_token(token: str) -> None:
             if "GITHUB_TOKEN_COPILOT=" in text:
                 lines = [
                     f"GITHUB_TOKEN_COPILOT={token}\n"
-                    if l.startswith("GITHUB_TOKEN_COPILOT=")
-                    else l
-                    for l in text.splitlines(keepends=True)
+                    if line.startswith("GITHUB_TOKEN_COPILOT=")
+                    else line
+                    for line in text.splitlines(keepends=True)
                 ]
                 env_path.write_text("".join(lines))
             else:
@@ -541,7 +541,9 @@ def _rebuild_catalogue(
     unique_gc = [m for m in gc_models if m["sdk_name"] not in gh_sdk_names]
 
     # Bedrock: fill-in-the-gap — only include models not already in GH or GC.
-    covered_sdk_names = gh_sdk_names | {m["sdk_name"] for m in unique_gc}
+    covered_sdk_names: set[str] = cast(
+        set[str], gh_sdk_names | {str(m["sdk_name"]) for m in unique_gc}
+    )
     br_models = _build_bedrock_catalogue(covered_sdk_names)
 
     GITHUB_MODELS = gh_models + unique_gc + br_models  # type: ignore[assignment,operator]
