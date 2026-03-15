@@ -1048,7 +1048,14 @@ def _discover_models(
             verify=SSL_VERIFY,
         )
         resp.raise_for_status()
-        raw_models = resp.json()
+        raw = resp.json()
+        # Normalize responses: some endpoints (Azure-style) return a top-level
+        # object with a "value" list, e.g. {"value": [ ... ]}, while others return
+        # a plain list. Accept either shape.
+        if isinstance(raw, dict) and "value" in raw and isinstance(raw["value"], list):
+            raw_models = raw["value"]
+        else:
+            raw_models = raw
 
         # Partition by the "task" field reported by the API — no name-guessing needed.
         # The GitHub Models /models endpoint returns task="chat-completion" or
@@ -1077,45 +1084,55 @@ def _discover_models(
         entries = []
 
         for sdk_name in chat_candidates:
-            if _probe_chat_model(token, sdk_name, GITHUB_INFERENCE_ENDPOINT):
+            ok = _probe_chat_model(token, sdk_name, GITHUB_INFERENCE_ENDPOINT)
+            if ok:
                 log.debug("  OK (chat) %s", sdk_name)
-                entries.append(
-                    {
-                        "name": f"{prefix}{sdk_name}",
-                        "sdk_name": sdk_name,
-                        "token": token_label,
-                        "kind": "chat",
-                        "size": 0,
-                        "modified_at": "2024-01-01T00:00:00Z",
-                        "details": {
-                            "family": sdk_name.split("-")[0].lower(),
-                            "parameter_size": "unknown",
-                        },
-                    }
-                )
             else:
-                log.debug("  -- (chat) %s (skipped — probe failed)", sdk_name)
+                log.debug("  -- (chat) %s (probe failed; including anyway)", sdk_name)
+            # Include the model entry regardless of probe result. The provider's
+            # /models catalogue is the source of truth; some backends return 4xx
+            # for minimal probes even though the model should be advertised.
+            entries.append(
+                {
+                    "name": f"{prefix}{sdk_name}",
+                    "sdk_name": sdk_name,
+                    "token": token_label,
+                    "kind": "chat",
+                    "size": 0,
+                    "modified_at": "2024-01-01T00:00:00Z",
+                    "details": {
+                        "family": sdk_name.split("-")[0].lower(),
+                        "parameter_size": "unknown",
+                    },
+                    "probe_ok": ok,
+                }
+            )
 
         for sdk_name in embed_candidates:
-            if _probe_embed_model(token, sdk_name, GITHUB_INFERENCE_ENDPOINT):
+            ok = _probe_embed_model(token, sdk_name, GITHUB_INFERENCE_ENDPOINT)
+            if ok:
                 log.debug("  OK (embed) %s", sdk_name)
-                entries.append(
-                    {
-                        "name": f"{prefix}{sdk_name}",
-                        "sdk_name": sdk_name,
-                        "token": token_label,
-                        "kind": "embed",
-                        "size": 0,
-                        "modified_at": "2024-01-01T00:00:00Z",
-                        "details": {
-                            "family": sdk_name.split("-")[0].lower(),
-                            "parameter_size": "unknown",
-                            "dimensions": _GH_EMBED_DIMS.get(sdk_name, 0),
-                        },
-                    }
-                )
             else:
-                log.debug("  -- (embed) %s (skipped — probe failed)", sdk_name)
+                log.debug("  -- (embed) %s (probe failed; including anyway)", sdk_name)
+            # Advertise embed models even if the probe returned a non-200. This
+            # ensures clients can see available embed providers; call-time errors
+            # will surface if the model truly isn't usable.
+            entries.append(
+                {
+                    "name": f"{prefix}{sdk_name}",
+                    "sdk_name": sdk_name,
+                    "token": token_label,
+                    "kind": "embed",
+                    "size": 0,
+                    "modified_at": "2024-01-01T00:00:00Z",
+                    "details": {
+                        "family": sdk_name.split("-")[0].lower(),
+                        "parameter_size": "unknown",
+                        "dimensions": _GH_EMBED_DIMS.get(sdk_name, 0),
+                    },
+                    "probe_ok": ok,
+                }
+            )
 
         chat_count = sum(1 for e in entries if e.get("kind") == "chat")
         embed_count = sum(1 for e in entries if e.get("kind") == "embed")
@@ -1154,7 +1171,7 @@ def _discover_models(
 
 GH_PREFIX = "GH | "
 GC_PREFIX = "GC | "
-REMOTE_PREFIX = "155 | "
+REMOTE_PREFIX = "OL | "
 # BR_PREFIX is defined earlier alongside Bedrock config
 
 # Populated at module load time; rebuilt after Copilot login via _rebuild_catalogue().
@@ -1597,7 +1614,7 @@ def get_tags():
         log.warning("Could not reach remote Ollama: %s", e)
         remote_models = []
 
-    # Prefix each remote Ollama model name with "155 | "
+    # Prefix each remote Ollama model name with "OL | "
     for m in remote_models:
         if not m.get("name", "").startswith(REMOTE_PREFIX):
             m["name"] = REMOTE_PREFIX + m["name"]
@@ -1659,7 +1676,7 @@ def show():
             }
         )
 
-    # Strip "155 | " prefix before forwarding to remote Ollama
+    # Strip "OL | " prefix before forwarding to remote Ollama
     if model_name.startswith(REMOTE_PREFIX):
         data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request("POST", "/api/show", data=data)
@@ -1686,7 +1703,7 @@ def chat():
         "/api/chat model=%r stream=%s msgs=%d", model_name, do_stream, len(messages)
     )
 
-    # Strip "155 | " prefix and forward to remote Ollama
+    # Strip "OL | " prefix and forward to remote Ollama
     if model_name.startswith(REMOTE_PREFIX):
         data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request("POST", "/api/chat", data=data, stream=do_stream)
@@ -1762,7 +1779,7 @@ def generate():
     system = data.get("system", "")
     log.debug("/api/generate model=%r stream=%s", model_name, do_stream)
 
-    # Strip "155 | " prefix and forward to remote Ollama
+    # Strip "OL | " prefix and forward to remote Ollama
     if model_name.startswith(REMOTE_PREFIX):
         data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request("POST", "/api/generate", data=data, stream=do_stream)
@@ -1857,7 +1874,7 @@ def chat_completions():
     do_stream = data.get("stream", False)
     log.debug("/api/chat/completions model=%r stream=%s", model_name, do_stream)
 
-    # Strip "155 | " prefix and forward to remote Ollama
+    # Strip "OL | " prefix and forward to remote Ollama
     if model_name.startswith(REMOTE_PREFIX):
         data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request(
@@ -1988,7 +2005,7 @@ def _handle_embed_request(model_name: str, data: dict[str, object]):
     Priority:
       1. GH | / GC | embed models  → _gh_embed (free GitHub quota)
       2. BR | embed models          → _bedrock_embed (pay-per-use fallback)
-      3. 155 | / bare names         → fall through to remote Ollama proxy
+      3. OL | / bare names         → fall through to remote Ollama proxy
     """
     # Normalise input: accept both "input" (OpenAI style) and "prompt" (Ollama style)
     raw_input = data.get("input") or data.get("prompt", "")
@@ -2539,7 +2556,7 @@ def v1_chat_completions():
         len(messages),
     )
 
-    # Strip "155 | " prefix and forward to remote Ollama's OpenAI-compat endpoint
+    # Strip "OL | " prefix and forward to remote Ollama's OpenAI-compat endpoint
     if model_name.startswith(REMOTE_PREFIX):
         data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request(
