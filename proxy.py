@@ -18,6 +18,7 @@ import os
 import sys
 import threading
 import time
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -968,14 +969,20 @@ def auth_copilot():
     # Poll in a background thread so the endpoint returns immediately
     threading.Thread(target=_poll_device_flow, daemon=True).start()
 
+    # Open the GitHub device page (pre-filled with the user code) and the
+    # local auth status page in the default browser.
+    device_url = f"{d['verification_uri']}?user_code={d['user_code']}"
+    status_url = f"http://localhost:{PORT}/auth/status"
+    threading.Timer(0.5, webbrowser.open, args=[device_url]).start()
+    threading.Timer(1.0, webbrowser.open, args=[status_url]).start()
+
     return jsonify(
         {
             "status": "pending",
             "message": (
-                f"1. Open https://github.com/login/device in your browser\n"
-                f"2. Enter code: {d['user_code']}\n"
-                f"3. Approve the request\n"
-                f"4. Poll GET /auth/status until status is 'authenticated'"
+                f"Opening browser automatically.\n"
+                f"If it doesn't open, go to {d['verification_uri']} "
+                f"and enter code: {d['user_code']}"
             ),
             "verification_uri": d["verification_uri"],
             "user_code": d["user_code"],
