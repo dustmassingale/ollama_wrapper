@@ -233,46 +233,48 @@ Any model installed on the Ollama server at `REMOTE_OLLAMA_URL` is automatically
 
 Use the **OpenAI provider** with the proxy's `/v1/` base URL. The `apiKey` value is ignored by the proxy but must be non-empty.
 
-```json
-{
-  "models": [
-    {
-      "title": "GH | gpt-4.1",
-      "provider": "openai",
-      "model": "GH | gpt-4.1",
-      "apiBase": "http://127.0.0.1:5000/v1/",
-      "apiKey": "proxy"
-    },
-    {
-      "title": "GC | claude-sonnet-4",
-      "provider": "openai",
-      "model": "GC | claude-sonnet-4",
-      "apiBase": "http://127.0.0.1:5000/v1/",
-      "apiKey": "proxy"
-    },
-    {
-      "title": "BR | us.anthropic.claude-3-5-haiku-20241022-v1:0",
-      "provider": "openai",
-      "model": "BR | us.anthropic.claude-3-5-haiku-20241022-v1:0",
-      "apiBase": "http://127.0.0.1:5000/v1/",
-      "apiKey": "proxy"
-    },
-    {
-      "title": "OL | llama3.2",
-      "provider": "openai",
-      "model": "OL | llama3.2",
-      "apiBase": "http://127.0.0.1:5000/v1/",
-      "apiKey": "proxy"
-    }
-  ],
-  "embeddingsProvider": {
-    "provider": "openai",
-    "model": "GH | text-embedding-3-small",
-    "apiBase": "http://127.0.0.1:5000/v1/",
-    "apiKey": "proxy"
-  }
-}
+
+Notes and troubleshooting
+
+- Model name: Use the exact model name as returned by the proxy’s `/v1/models` or `/api/tags` (including the `GH | ` prefix and spacing). Model names are case-sensitive.
+- GITHUB_TOKEN: The GH Cohere models are available only if the proxy discovered them using your `GITHUB_TOKEN`. Ensure `GITHUB_TOKEN` is set in `.env` and restart the proxy.
+- Verify available models: Hit the proxy endpoint `GET http://127.0.0.1:5000/v1/models` (or open the proxy's index page) to see the exact model string you should configure in Continue.dev.
+- Fallback: If a GH Cohere model is not available for your token, the proxy will expose alternative embedding models (e.g., OpenAI-style `text-embedding-3-*` if present). Check the `/v1/models` output and pick an available model.
+- Dimensions: Cohere English vectors are typically 1024-d; the proxy reports embed dimensions in `/v1/models` details for convenience.
+
+Example full Continue.dev snippet (embedding + models):
+
+```yaml
+models:
+  # ── Ollama Autodetect — shows entire catalog ─────────────────────────────────
+  - name: Autodetect
+    provider: ollama
+    model: AUTODETECT
+    apiBase: http://127.0.0.1:5000
+
+  # ── text embedding and rerank — proxy API ─────────────────────────────────
+  - name: GH | Cohere-embed-v3-english
+    apiKey: "proxy"
+    model: Cohere-embed-v3-english
+    provider: openai
+    roles:
+      - embed
+      - rerank
+  # ── Claude Haiku 4.5 — direct Copilot API ─────────────────────────────────
+  - name: GH | GPT-4.1
+    apiBase: "http://127.0.0.1:5000/v1/"
+    apiKey: "proxy"
+    capabilities:
+      - tool_use
+    model: gpt-4.1
+    name: GH | GPT-4.1
+    provider: openai
+    roles:
+      - chat
+      - edit
+      - apply
 ```
+
 
 ---
 
