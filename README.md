@@ -6,7 +6,7 @@ A lightweight Python proxy that unifies **remote Ollama models**, **GitHub Model
 
 ## Recent changes
 
-- Remote Ollama prefix renamed from `155 |` to `OL |` in code and docs.
+- Remote Ollama prefix renamed to `OL |` in code and docs.
 - GitHub/Azure model discovery improved:
   - Now accepts Azure-style `/models` responses that return an object with a top-level `value` list.
   - Discovered GH models are advertised even if a minimal probe returns 4xx/5xx (the discovery entries now include a `probe_ok` flag for diagnostics).

@@ -1172,7 +1172,6 @@ def _discover_models(
 GH_PREFIX = "GH | "
 GC_PREFIX = "GC | "
 REMOTE_PREFIX = "OL | "
-LEGACY_REMOTE_PREFIX = "155 | "
 # BR_PREFIX is defined earlier alongside Bedrock config
 
 # Populated at module load time; rebuilt after Copilot login via _rebuild_catalogue().
@@ -1270,15 +1269,13 @@ def _canonical_gh_name(name: str) -> str:
       - "GC | claude-haiku-4.5"              (already canonical, copilot)
       - "BR | anthropic.claude-3-haiku-..."  (already canonical, bedrock)
       - "OL | llama3.2"                      (already canonical, remote Ollama)
-      - "155 | llama3.2"                     (legacy remote prefix accepted)
       - "gpt-4o"                             (bare — tried with all prefixes)
       - "claude-haiku-4.5"                   (bare with dots — normalised)
     """
     if name in GITHUB_MODEL_MAP:
         return name
-    # Accept standard prefixes plus the remote Ollama prefix and the legacy
-    # numeric prefix ("155 | ") for backwards compatibility.
-    for prefix in (GH_PREFIX, GC_PREFIX, BR_PREFIX, REMOTE_PREFIX, "155 | "):
+    # Accept standard prefixes plus the remote Ollama prefix for backwards compatibility.
+    for prefix in (GH_PREFIX, GC_PREFIX, BR_PREFIX, REMOTE_PREFIX):
         prefixed = prefix + name
         if prefixed in GITHUB_MODEL_MAP:
             return prefixed
@@ -1286,7 +1283,7 @@ def _canonical_gh_name(name: str) -> str:
     normalised = name.replace(".", "-")
     if normalised in GITHUB_MODEL_MAP:
         return normalised
-    for prefix in (GH_PREFIX, GC_PREFIX, BR_PREFIX, REMOTE_PREFIX, "155 | "):
+    for prefix in (GH_PREFIX, GC_PREFIX, BR_PREFIX, REMOTE_PREFIX):
         prefixed_normalised = prefix + normalised
         if prefixed_normalised in GITHUB_MODEL_MAP:
             return prefixed_normalised
@@ -1681,16 +1678,9 @@ def show():
             }
         )
 
-    # Strip "OL | " or legacy "155 | " prefix before forwarding to remote Ollama
-    if model_name.startswith(REMOTE_PREFIX) or model_name.startswith(
-        LEGACY_REMOTE_PREFIX
-    ):
-        prefix = (
-            REMOTE_PREFIX
-            if model_name.startswith(REMOTE_PREFIX)
-            else LEGACY_REMOTE_PREFIX
-        )
-        data["model"] = model_name[len(prefix) :]
+    # Strip "OL | " prefix before forwarding to remote Ollama
+    if model_name.startswith(REMOTE_PREFIX):
+        data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request("POST", "/api/show", data=data)
         return make_proxy_response(resp)
 
@@ -1715,16 +1705,9 @@ def chat():
         "/api/chat model=%r stream=%s msgs=%d", model_name, do_stream, len(messages)
     )
 
-    # Strip "OL | " or legacy "155 | " prefix and forward to remote Ollama
-    if model_name.startswith(REMOTE_PREFIX) or model_name.startswith(
-        LEGACY_REMOTE_PREFIX
-    ):
-        prefix = (
-            REMOTE_PREFIX
-            if model_name.startswith(REMOTE_PREFIX)
-            else LEGACY_REMOTE_PREFIX
-        )
-        data["model"] = model_name[len(prefix) :]
+    # Strip "OL | " prefix and forward to remote Ollama
+    if model_name.startswith(REMOTE_PREFIX):
+        data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request("POST", "/api/chat", data=data, stream=do_stream)
         if do_stream:
             return make_streaming_proxy_response(resp, "application/x-ndjson")
@@ -1798,16 +1781,9 @@ def generate():
     system = data.get("system", "")
     log.debug("/api/generate model=%r stream=%s", model_name, do_stream)
 
-    # Strip "OL | " or legacy "155 | " prefix and forward to remote Ollama
-    if model_name.startswith(REMOTE_PREFIX) or model_name.startswith(
-        LEGACY_REMOTE_PREFIX
-    ):
-        prefix = (
-            REMOTE_PREFIX
-            if model_name.startswith(REMOTE_PREFIX)
-            else LEGACY_REMOTE_PREFIX
-        )
-        data["model"] = model_name[len(prefix) :]
+    # Strip "OL | " prefix and forward to remote Ollama
+    if model_name.startswith(REMOTE_PREFIX):
+        data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request("POST", "/api/generate", data=data, stream=do_stream)
         if do_stream:
             return make_streaming_proxy_response(resp, "application/x-ndjson")
@@ -1900,16 +1876,9 @@ def chat_completions():
     do_stream = data.get("stream", False)
     log.debug("/api/chat/completions model=%r stream=%s", model_name, do_stream)
 
-    # Strip "OL | " or legacy "155 | " prefix and forward to remote Ollama
-    if model_name.startswith(REMOTE_PREFIX) or model_name.startswith(
-        LEGACY_REMOTE_PREFIX
-    ):
-        prefix = (
-            REMOTE_PREFIX
-            if model_name.startswith(REMOTE_PREFIX)
-            else LEGACY_REMOTE_PREFIX
-        )
-        data["model"] = model_name[len(prefix) :]
+    # Strip "OL | " prefix and forward to remote Ollama
+    if model_name.startswith(REMOTE_PREFIX):
+        data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request(
             "POST", "/api/chat/completions", data=data, stream=do_stream
         )
@@ -2597,16 +2566,9 @@ def v1_chat_completions():
         len(messages),
     )
 
-    # Strip "OL | " or legacy "155 | " prefix and forward to remote Ollama's OpenAI-compat endpoint
-    if model_name.startswith(REMOTE_PREFIX) or model_name.startswith(
-        LEGACY_REMOTE_PREFIX
-    ):
-        prefix = (
-            REMOTE_PREFIX
-            if model_name.startswith(REMOTE_PREFIX)
-            else LEGACY_REMOTE_PREFIX
-        )
-        data["model"] = model_name[len(prefix) :]
+    # Strip "OL | " prefix and forward to remote Ollama's OpenAI-compat endpoint
+    if model_name.startswith(REMOTE_PREFIX):
+        data["model"] = model_name[len(REMOTE_PREFIX) :]
         resp = proxy_request(
             "POST", "/v1/chat/completions", data=data, stream=do_stream
         )
