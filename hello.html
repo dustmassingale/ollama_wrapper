@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Hello World with JavaScript</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background: #f5f5f5;
+        }
+        .container {
+            text-align: center;
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            transition: transform 0.2s;
+        }
+        .container:hover {
+            transform: scale(1.01);
+        }
+        #changeTextBtn {
+            margin-top: 1rem;
+            padding: 0.5rem 1rem;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        #changeTextBtn:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 id="greeting">Hello, World!</h1>
+        <button id="changeTextBtn">Click Me</button>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const greetingElement = document.getElementById('greeting');
+            const changeTextBtn = document.getElementById('changeTextBtn');
+
+            changeTextBtn.addEventListener('click', function() {
+                // Simple animation option
+                greetingElement.style.opacity = '0';
+                setTimeout(() => {
+                    greetingElement.textContent = "JavaScript makes it simple!";
+                    greetingElement.style.opacity = '1';
+                    changeTextBtn.textContent = "Click Again";
+                    changeTextBtn.style.backgroundColor = "#28a745";
+                }, 200);
+            });
+        });
+    </script>
+</body>
+</html>

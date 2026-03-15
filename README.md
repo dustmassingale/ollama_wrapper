@@ -245,34 +245,60 @@ Notes and troubleshooting
 Example full Continue.dev snippet (embedding + models):
 
 ```yaml
+name: Local Assistant
+version: 1.0.0
+schema: 1.0.0f
 models:
-  # ── Ollama Autodetect — shows entire catalog ─────────────────────────────────
-  - name: Autodetect
-    provider: ollama
-    model: AUTODETECT
-    apiBase: http://127.0.0.1:5000
-
   # ── text embedding and rerank — proxy API ─────────────────────────────────
   - name: GH | Cohere-embed-v3-english
     apiKey: "proxy"
-    model: Cohere-embed-v3-english
+    model: "GH | Cohere-embed-v3-english"
     provider: openai
+    apiBase: "http://127.0.0.1:5000/v1/"
     roles:
       - embed
       - rerank
-  # ── Claude Haiku 4.5 — direct Copilot API ─────────────────────────────────
-  - name: GH | GPT-4.1
+      
+  # ──  Chat, Edit and Apply — Bedrock proxy API ─────────────────────────────────
+  - name: BR | Ministral-3
     apiBase: "http://127.0.0.1:5000/v1/"
     apiKey: "proxy"
     capabilities:
       - tool_use
-    model: gpt-4.1
-    name: GH | GPT-4.1
+    model: "BR | mistral.ministral-3-14b-instruct"    # <- prefer this exact prefixed form
     provider: openai
     roles:
       - chat
       - edit
       - apply
+  # ──  Chatand Edit — Github Copilot proxy API ─────────────────────────────────
+  - name: GC | GPT-4.1
+    apiBase: "http://127.0.0.1:5000/v1/"
+    capabilities:
+      - tool_use
+    model: "GC | gpt-4.1"
+    provider: openai
+    roles:
+      - chat
+      - edit
+  # ──  Chat, Edit and Autocomplete — Github AzureAI proxy API ─────────────────────────────────
+  - name: GH | gpt-4o-mini
+    provider: openai
+    model: "GH | gpt-4o-mini"
+    apiBase: "http://127.0.0.1:5000/v1/"
+    apiKey: "proxy"
+    capabilities:
+      - tool_use
+    defaultCompletionOptions:
+      contextLength: 64000
+      maxTokens: 256
+      temperature: 0.2
+      topP: 0.95
+    roles:
+      - chat
+      - autocomplete
+      - apply
+
 ```
 
 
