@@ -1,123 +1,177 @@
-# Ollama Proxy Server with GitHub Copilot Models
+# Ollama Proxy Server with GitHub Models
 
-A simple Python proxy that routes requests to your Ollama server at 192.168.1.155 and adds GitHub Copilot models for IDE integration.
+A lightweight Python proxy that:
+
+- Exposes every model from the remote Ollama server at `192.168.1.155` with a `155 | ` prefix
+- Exposes GitHub Models (via the Azure AI Inference SDK) with a `GH | ` prefix
+- Presents a unified Ollama-compatible API **and** an OpenAI-compatible `/v1/` surface so any client works without extra configuration
+
+---
 
 ## Quick Start
 
-### Installation
+### 1. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Run
+### 2. Configure your GitHub token
+
+Create a `.env` file in the project root (see `.env.example`):
+
+```
+GITHUB_TOKEN=github_pat_...
+```
+
+The token needs the `models:read` permission scope.  
+Get one at: https://github.com/settings/tokens
+
+### 3. Run
 
 ```bash
 python proxy.py
 ```
 
-The proxy will start on `http://localhost:5000`
+The proxy starts on **`http://localhost:5000`**.
 
-## Features
+---
 
-- ✅ Proxies all requests to Ollama server at 192.168.1.155:11434
-- ✅ Adds GitHub Copilot models:
-  - GPT-5 mini
-  - Claude Haiku 4.5
-  - Claude Opus 4.6
-  - Claude Sonnet 4.6
-  - Gemini 3 Flash (Preview)
-  - Gemini 3.1 Pro (Preview)
-  - GPT-5.3-Codex
-  - GPT-5.4
-  - Grok Code Fast 1
+## Continue.dev Configuration
 
-## API Endpoints
+In your Continue.dev `config.json`, point the provider at the proxy using the **OpenAI provider** type with the `/v1` base:
 
-### GET /
-Returns API information
-
-### GET /api/tags
-Lists all available models (Ollama + GitHub)
-
-### GET /health
-Health status of proxy and remote Ollama server
-
-### POST /api/generate
-Generate text using specified model
 ```json
 {
-  "model": "llama2",
-  "prompt": "Hello world"
-}
-```
-
-### POST /api/chat/completions
-Chat completion endpoint
-```json
-{
-  "model": "llama2",
-  "messages": [
-    {"role": "user", "content": "Hello"}
+  "models": [
+    {
+      "title": "GH | claude-haiku-4-5",
+      "provider": "openai",
+      "model": "GH | claude-haiku-4-5",
+      "apiBase": "http://127.0.0.1:5000/v1/",
+      "apiKey": "proxy"
+    },
+    {
+      "title": "GH | gpt-4.1",
+      "provider": "openai",
+      "model": "GH | gpt-4.1",
+      "apiBase": "http://127.0.0.1:5000/v1/",
+      "apiKey": "proxy"
+    },
+    {
+      "title": "155 | llama3.2",
+      "provider": "openai",
+      "model": "155 | llama3.2",
+      "apiBase": "http://127.0.0.1:5000/v1/",
+      "apiKey": "proxy"
+    }
   ]
 }
 ```
 
+> **Note:** The `apiKey` value is ignored by the proxy but must be non-empty for Continue.dev to accept the config.
+
+---
+
+## Available Models
+
+### GitHub Models (`GH | ` prefix)
+
+| Display name | GitHub SDK model ID |
+|---|---|
+| `GH \| gpt-4o-mini` | `gpt-4o-mini` |
+| `GH \| claude-haiku-4-5` | `claude-haiku-4-5` |
+| `GH \| claude-opus-4-5` | `claude-opus-4-5` |
+| `GH \| claude-sonnet-4-5` | `claude-sonnet-4-5` |
+| `GH \| gemini-2.0-flash` | `gemini-2.0-flash` |
+| `GH \| gemini-2.0-flash-thinking-exp` | `gemini-2.0-flash-thinking-exp` |
+| `GH \| gpt-4.1` | `gpt-4.1` |
+| `GH \| gpt-4.1-mini` | `gpt-4.1-mini` |
+| `GH \| grok-3` | `grok-3` |
+| `GH \| grok-3-mini` | `grok-3-mini` |
+
+### Remote Ollama Models (`155 | ` prefix)
+
+Any model installed on the Ollama server at `192.168.1.155` is automatically listed with the `155 | ` prefix, e.g. `155 | llama3.2`, `155 | mistral`.
+
+---
+
+## API Endpoints
+
+### OpenAI-compatible (recommended for Continue.dev)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/v1/models` | List all models in OpenAI format |
+| `POST` | `/v1/chat/completions` | Chat completions (streaming + non-streaming) |
+
+### Ollama-native
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/tags` | List all models in Ollama format |
+| `POST` | `/api/show` | Model metadata |
+| `POST` | `/api/chat` | Ollama-style chat (NDJSON) |
+| `POST` | `/api/generate` | Ollama-style generate (NDJSON) |
+| `POST` | `/api/chat/completions` | OpenAI-compat chat (via Ollama path) |
+| `POST` | `/api/embeddings` | Embeddings (legacy alias) |
+| `POST` | `/api/embed` | Embeddings |
+| `POST` | `/api/pull` | Pull a model on the remote server |
+| `GET` | `/api/ps` | List running models |
+| `DELETE` | `/api/delete` | Delete a model on the remote server |
+| `POST` | `/api/copy` | Copy a model on the remote server |
+
+### Health
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Reports proxy health and remote Ollama status |
+
+---
+
 ## Configuration
 
-Edit `proxy.py` to change:
-- `REMOTE_OLLAMA_URL` - Your Ollama server address (default: http://192.168.1.155:11434)
-- `GITHUB_MODELS` - List of available GitHub models
-- Port - Currently 5000, change in `app.run()` at bottom
+All configuration is via environment variables (or a `.env` file):
 
-## Usage Examples
+| Variable | Default | Description |
+|---|---|---|
+| `GITHUB_TOKEN` | *(required for GH models)* | GitHub PAT with `models:read` scope |
+| `REMOTE_OLLAMA_URL` | `http://192.168.1.155:11434` | Remote Ollama server address |
+| `PORT` | `5000` | Port the proxy listens on |
 
-### List all models
-```bash
-curl http://localhost:5000/api/tags
-```
-
-### Generate text
-```bash
-curl -X POST http://localhost:5000/api/generate \
-  -H "Content-Type: application/json" \
-  -d '{"model": "llama2", "prompt": "Why is the sky blue?"}'
-```
-
-### Chat
-```bash
-curl -X POST http://localhost:5000/api/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "llama2", "messages": [{"role": "user", "content": "Hello"}]}'
-```
-
-### Health check
-```bash
-curl http://localhost:5000/health
-```
+---
 
 ## How It Works
 
-1. **Local models** - Any request for a model that exists on your Ollama server is proxied directly
-2. **GitHub models** - Requests for GitHub Copilot models return a placeholder response
-3. **Listing** - `/api/tags` combines models from both sources
+1. **`GET /v1/models` or `GET /api/tags`** — the proxy fetches the live model list from `192.168.1.155`, prefixes each name with `155 | `, appends the GitHub model catalogue (each prefixed `GH | `), and returns the combined list.
+
+2. **Request with `155 | <model>`** — the proxy strips the prefix and forwards the request verbatim to `http://192.168.1.155:11434`.
+
+3. **Request with `GH | <model>`** — the proxy looks up the GitHub SDK model ID, calls `https://models.inference.ai.azure.com` via the `azure-ai-inference` SDK using your `GITHUB_TOKEN`, and translates the response back into Ollama or OpenAI format depending on which endpoint was called.
+
+4. **Streaming** — both Ollama NDJSON streaming (`/api/chat`, `/api/generate`) and OpenAI SSE streaming (`/v1/chat/completions`) are fully supported.
+
+---
 
 ## Troubleshooting
 
-### Remote server not responding
-- Verify Ollama is running: `curl http://192.168.1.155:11434/api/tags`
-- Check firewall allows access to port 11434
-- Update `REMOTE_OLLAMA_URL` in proxy.py if your server is at a different address
+### `GITHUB_TOKEN is not configured`
+Add `GITHUB_TOKEN=github_pat_...` to your `.env` file and restart the proxy.
 
-### Models not showing up
-- Make sure Ollama is running on 192.168.1.155
-- Models may need to be pulled first: `ollama pull llama2`
+### `Model not found` for a GitHub model
+Check that the model name in your client matches exactly (including the `GH | ` prefix and dashes, not dots). The proxy also accepts bare names with dots, e.g. `claude-haiku-4.5` is normalised to `GH | claude-haiku-4-5` automatically.
+
+### Remote Ollama models not showing
+Verify the remote server is reachable:
+```bash
+curl http://192.168.1.155:11434/api/tags
+```
+Update `REMOTE_OLLAMA_URL` in `.env` if your server is at a different address.
 
 ### Port already in use
-Change the port in proxy.py line at the bottom:
-```python
-app.run(host="0.0.0.0", port=5000, debug=True)  # Change 5000 to another port
-```
+Set `PORT=<number>` in your `.env` file.
+
+---
 
 ## License
 

@@ -141,17 +141,31 @@ GITHUB_MODEL_MAP: dict[str, dict] = {m["name"]: m for m in GITHUB_MODELS}
 
 
 def is_github_model(name: str) -> bool:
-    """Accept both prefixed ('GH | foo') and bare ('foo') names."""
-    return name in GITHUB_MODEL_MAP or (GH_PREFIX + name) in GITHUB_MODEL_MAP
+    """Accept prefixed, bare, and dot-notation names (e.g. 'claude-haiku-4.5')."""
+    return _canonical_gh_name(name) in GITHUB_MODEL_MAP
 
 
 def _canonical_gh_name(name: str) -> str:
-    """Return the prefixed display name regardless of whether the prefix was supplied."""
+    """Return the prefixed display name regardless of whether the prefix was supplied.
+
+    Handles three input forms:
+      - "GH | claude-haiku-4-5"  (already canonical)
+      - "claude-haiku-4-5"       (bare, dashes)
+      - "claude-haiku-4.5"       (bare, dots — as sent by Continue.dev)
+    """
     if name in GITHUB_MODEL_MAP:
         return name
+    # Try adding the prefix as-is
     prefixed = GH_PREFIX + name
     if prefixed in GITHUB_MODEL_MAP:
         return prefixed
+    # Normalise dots to dashes and try again (e.g. "claude-haiku-4.5" -> "claude-haiku-4-5")
+    normalised = name.replace(".", "-")
+    if normalised in GITHUB_MODEL_MAP:
+        return normalised
+    prefixed_normalised = GH_PREFIX + normalised
+    if prefixed_normalised in GITHUB_MODEL_MAP:
+        return prefixed_normalised
     return name
 
 
@@ -746,23 +760,211 @@ def root():
     return jsonify(
         {
             "message": "Ollama Proxy with GitHub Models",
-            "version": "1.3.0",
+            "version": "1.4.0",
             "endpoints": [
-                "GET    /api/tags             — list all models",
-                "POST   /api/show             — model metadata",
-                "POST   /api/chat             — Ollama-style chat (NDJSON)",
-                "POST   /api/generate         — Ollama-style generate (NDJSON)",
-                "POST   /api/chat/completions — OpenAI-compat chat completions",
-                "POST   /api/embeddings       — embeddings (legacy alias)",
-                "POST   /api/embed            — embeddings",
-                "POST   /api/pull             — pull a model",
-                "GET    /api/ps               — running models",
-                "DELETE /api/delete           — delete a model",
-                "POST   /api/copy             — copy a model",
-                "GET    /health               — health check",
+                "GET    /api/tags              — list all models",
+                "POST   /api/show              — model metadata",
+                "POST   /api/chat              — Ollama-style chat (NDJSON)",
+                "POST   /api/generate          — Ollama-style generate (NDJSON)",
+                "POST   /api/chat/completions  — OpenAI-compat chat completions",
+                "POST   /api/embeddings        — embeddings (legacy alias)",
+                "POST   /api/embed             — embeddings",
+                "POST   /api/pull              — pull a model",
+                "GET    /api/ps                — running models",
+                "DELETE /api/delete            — delete a model",
+                "POST   /api/copy              — copy a model",
+                "GET    /v1/models             — OpenAI-compat model list",
+                "POST   /v1/chat/completions   — OpenAI-compat chat completions",
+                "GET    /health                — health check",
             ],
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# /v1/models  and  /v1/chat/completions  (OpenAI-compat surface for Continue.dev)
+# ---------------------------------------------------------------------------
+
+
+def _all_models_as_openai() -> list[dict]:
+    """Return every model (remote Ollama + GitHub) in OpenAI /v1/models format."""
+    models = []
+
+    try:
+        resp = requests.get(f"{REMOTE_OLLAMA_URL}/api/tags", timeout=5)
+        for m in resp.json().get("models", []):
+            raw_name = m.get("name", "")
+            display = (
+                raw_name
+                if raw_name.startswith(REMOTE_PREFIX)
+                else REMOTE_PREFIX + raw_name
+            )
+            models.append(
+                {
+                    "id": display,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "ollama",
+                }
+            )
+    except Exception as e:
+        log.warning("Could not reach remote Ollama for /v1/models: %s", e)
+
+    for m in GITHUB_MODELS:
+        models.append(
+            {
+                "id": m["name"],
+                "object": "model",
+                "created": 0,
+                "owned_by": "github",
+            }
+        )
+
+    return models
+
+
+@app.route("/v1/models", methods=["GET"])
+def v1_models():
+    """OpenAI-compat GET /v1/models — lists all proxied models."""
+    return jsonify({"object": "list", "data": _all_models_as_openai()})
+
+
+def _github_chat_streaming_openai(model_name: str, messages: list[dict]):
+    """
+    Stream GitHub model response as OpenAI-compat SSE chunks
+    (data: {...}\\n\\n lines, terminated with data: [DONE]).
+    """
+    sdk_name = get_sdk_name(model_name)
+    sdk_messages = _ollama_messages_to_sdk(messages)
+    client = _build_github_client()
+    created = int(datetime.now(timezone.utc).timestamp())
+
+    try:
+        response = client.complete(
+            model=sdk_name,
+            messages=sdk_messages,
+            stream=True,
+        )
+
+        for update in response:
+            if not update.choices:
+                continue
+            delta = update.choices[0].delta
+            content = delta.content if delta and delta.content else ""
+            finish_reason = update.choices[0].finish_reason
+
+            chunk = {
+                "id": "chatcmpl-github",
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": content},
+                        "finish_reason": str(finish_reason) if finish_reason else None,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+        yield "data: [DONE]\n\n"
+
+    except HttpResponseError as e:
+        log.error("GitHub SDK streaming error: %s %s", e.status_code, e.message)
+        err_chunk = {
+            "error": {"message": f"{e.status_code}: {e.message}", "type": "api_error"}
+        }
+        yield f"data: {json.dumps(err_chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+    finally:
+        client.close()
+
+
+@app.route("/v1/chat/completions", methods=["POST"])
+def v1_chat_completions():
+    """OpenAI-compat POST /v1/chat/completions — routes to GitHub or remote Ollama."""
+    data = request.json or {}
+    model_name = data.get("model", "")
+    do_stream = data.get("stream", False)
+    messages = data.get("messages", [])
+    log.debug(
+        "/v1/chat/completions model=%r stream=%s msgs=%d",
+        model_name,
+        do_stream,
+        len(messages),
+    )
+
+    # Strip "155 | " prefix and forward to remote Ollama's OpenAI-compat endpoint
+    if model_name.startswith(REMOTE_PREFIX):
+        data["model"] = model_name[len(REMOTE_PREFIX) :]
+        resp = proxy_request(
+            "POST", "/v1/chat/completions", data=data, stream=do_stream
+        )
+        if do_stream:
+            return make_streaming_proxy_response(resp, "text/event-stream")
+        return make_proxy_response(resp)
+
+    if is_github_model(model_name):
+        model_name = _canonical_gh_name(model_name)
+        if not GITHUB_TOKEN:
+            return jsonify(
+                {
+                    "error": {
+                        "message": "GITHUB_TOKEN is not configured.",
+                        "type": "api_error",
+                    }
+                }
+            ), 500
+
+        if do_stream:
+            return Response(
+                stream_with_context(
+                    _github_chat_streaming_openai(model_name, messages)
+                ),
+                status=200,
+                content_type="text/event-stream",
+            )
+
+        result = _github_chat_blocking(model_name, messages)
+        if "error" in result:
+            return jsonify(
+                {"error": {"message": result["error"], "type": "api_error"}}
+            ), 502
+
+        return jsonify(
+            {
+                "id": "chatcmpl-github",
+                "object": "chat.completion",
+                "created": int(datetime.now(timezone.utc).timestamp()),
+                "model": model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": result["message"],
+                        "finish_reason": result.get("done_reason", "stop"),
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": result.get("prompt_eval_count", 0),
+                    "completion_tokens": result.get("eval_count", 0),
+                    "total_tokens": result.get("prompt_eval_count", 0)
+                    + result.get("eval_count", 0),
+                },
+            }
+        )
+
+    # Unknown model — return a clear 404 in OpenAI error format
+    log.warning("/v1/chat/completions unknown model %r", model_name)
+    return jsonify(
+        {
+            "error": {
+                "message": f"Model '{model_name}' not found. Use GET /v1/models to list available models.",
+                "type": "invalid_request_error",
+                "code": "model_not_found",
+            }
+        }
+    ), 404
 
 
 # ---------------------------------------------------------------------------
