@@ -63,48 +63,23 @@ GITHUB_INFERENCE_ENDPOINT = "https://models.inference.ai.azure.com"
 GH_PREFIX = "GH | "
 REMOTE_PREFIX = "155 | "
 
+# Only models confirmed working against https://models.inference.ai.azure.com
+# with a standard GitHub PAT (models:read scope).
+# To verify available models for your token: GET https://models.inference.ai.azure.com/models
 GITHUB_MODELS = [
+    {
+        "name": "GH | gpt-4o",
+        "sdk_name": "gpt-4o",
+        "size": 0,
+        "modified_at": "2024-01-01T00:00:00Z",
+        "details": {"family": "gpt", "parameter_size": "unknown"},
+    },
     {
         "name": "GH | gpt-4o-mini",
         "sdk_name": "gpt-4o-mini",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
         "details": {"family": "gpt", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GH | claude-haiku-4-5",
-        "sdk_name": "claude-haiku-4-5",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "claude", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GH | claude-opus-4-5",
-        "sdk_name": "claude-opus-4-5",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "claude", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GH | claude-sonnet-4-5",
-        "sdk_name": "claude-sonnet-4-5",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "claude", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GH | gemini-2.0-flash",
-        "sdk_name": "gemini-2.0-flash",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "gemini", "parameter_size": "unknown"},
-    },
-    {
-        "name": "GH | gemini-2.0-flash-thinking-exp",
-        "sdk_name": "gemini-2.0-flash-thinking-exp",
-        "size": 0,
-        "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "gemini", "parameter_size": "unknown"},
     },
     {
         "name": "GH | gpt-4.1",
@@ -121,18 +96,18 @@ GITHUB_MODELS = [
         "details": {"family": "gpt", "parameter_size": "unknown"},
     },
     {
-        "name": "GH | grok-3",
-        "sdk_name": "grok-3",
+        "name": "GH | Meta-Llama-3.1-405B-Instruct",
+        "sdk_name": "Meta-Llama-3.1-405B-Instruct",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "grok", "parameter_size": "unknown"},
+        "details": {"family": "llama", "parameter_size": "405B"},
     },
     {
-        "name": "GH | grok-3-mini",
-        "sdk_name": "grok-3-mini",
+        "name": "GH | Meta-Llama-3.1-8B-Instruct",
+        "sdk_name": "Meta-Llama-3.1-8B-Instruct",
         "size": 0,
         "modified_at": "2024-01-01T00:00:00Z",
-        "details": {"family": "grok", "parameter_size": "unknown"},
+        "details": {"family": "llama", "parameter_size": "8B"},
     },
 ]
 

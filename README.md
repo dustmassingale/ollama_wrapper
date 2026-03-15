@@ -77,18 +77,22 @@ In your Continue.dev `config.json`, point the provider at the proxy using the **
 
 ### GitHub Models (`GH | ` prefix)
 
+These are the models confirmed available via `https://models.inference.ai.azure.com` with a standard GitHub PAT (`models:read` scope):
+
 | Display name | GitHub SDK model ID |
 |---|---|
+| `GH \| gpt-4o` | `gpt-4o` |
 | `GH \| gpt-4o-mini` | `gpt-4o-mini` |
-| `GH \| claude-haiku-4-5` | `claude-haiku-4-5` |
-| `GH \| claude-opus-4-5` | `claude-opus-4-5` |
-| `GH \| claude-sonnet-4-5` | `claude-sonnet-4-5` |
-| `GH \| gemini-2.0-flash` | `gemini-2.0-flash` |
-| `GH \| gemini-2.0-flash-thinking-exp` | `gemini-2.0-flash-thinking-exp` |
 | `GH \| gpt-4.1` | `gpt-4.1` |
 | `GH \| gpt-4.1-mini` | `gpt-4.1-mini` |
-| `GH \| grok-3` | `grok-3` |
-| `GH \| grok-3-mini` | `grok-3-mini` |
+| `GH \| Meta-Llama-3.1-405B-Instruct` | `Meta-Llama-3.1-405B-Instruct` |
+| `GH \| Meta-Llama-3.1-8B-Instruct` | `Meta-Llama-3.1-8B-Instruct` |
+
+> **Note:** Claude, Gemini, and Grok models require a GitHub Copilot subscription token and are not available with a standard PAT. To see exactly which models your token can access, run:
+> ```bash
+> curl -H "Authorization: Bearer $GITHUB_TOKEN" https://models.inference.ai.azure.com/models
+> ```
+> You can add any model returned by that endpoint to the `GITHUB_MODELS` catalogue in `proxy.py`.
 
 ### Remote Ollama Models (`155 | ` prefix)
 
