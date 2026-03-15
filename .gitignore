@@ -183,6 +183,9 @@ ENV/
 *.swo
 *~
 
+# Windows device file artifacts
+nul
+
 # Project-specific
 config.local.py
 settings.local.py
