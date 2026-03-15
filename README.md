@@ -4,6 +4,26 @@ A lightweight Python proxy that unifies **remote Ollama models**, **GitHub Model
 
 ---
 
+## Recent changes
+
+- Remote Ollama prefix renamed from `155 |` to `OL |` in code and docs.
+- GitHub/Azure model discovery improved:
+  - Now accepts Azure-style `/models` responses that return an object with a top-level `value` list.
+  - Discovered GH models are advertised even if a minimal probe returns 4xx/5xx (the discovery entries now include a `probe_ok` flag for diagnostics).
+- Files changed:
+  - `ollama_wrapper/proxy.py` — normalized Azure-style responses, adjusted probing behavior, and updated `REMOTE_PREFIX`.
+  - `ollama_wrapper/README.md` — updated examples and docs to use the `OL |` prefix.
+
+Commit and push
+Run the following to record and push the change:
+
+git add ollama_wrapper/proxy.py ollama_wrapper/README.md
+git commit -m "Remote Ollama prefix: 155 -> OL; improve GH model discovery and include probe_ok metadata"
+git push
+
+---
+
+
 ## Model Prefixes
 
 | Prefix | Source | Auth |
@@ -11,7 +31,7 @@ A lightweight Python proxy that unifies **remote Ollama models**, **GitHub Model
 | `GH \|` | GitHub Models via Azure AI Inference | GitHub PAT (`GITHUB_TOKEN`) |
 | `GC \|` | GitHub Copilot Chat API | OAuth device flow (interactive login) |
 | `BR \|` | AWS Bedrock (converse / invoke) | IAM access key |
-| `155 \|` | Remote Ollama server at `REMOTE_OLLAMA_URL` | None |
+| `OL \|` | Remote Ollama server at `REMOTE_OLLAMA_URL` | None |
 
 ---
 
@@ -166,9 +186,9 @@ Discovered dynamically after login. Includes Claude (Haiku/Sonnet/Opus), GPT-4o,
 
 Includes Claude 3/3.5/4 (Haiku, Sonnet, Opus), Mistral (Large, Small, Mixtral), Llama 3.1/3.2/3.3/4, Amazon Nova, DeepSeek R1, Palmyra, and Titan Embed models. Only models **not** already covered by `GH |` or `GC |` are advertised.
 
-### `155 |` — Remote Ollama Models
+### `OL |` — Remote Ollama Models
 
-Any model installed on the Ollama server at `REMOTE_OLLAMA_URL` is automatically listed with the `155 |` prefix, e.g. `155 | llama3.2`, `155 | mistral`.
+Any model installed on the Ollama server at `REMOTE_OLLAMA_URL` is automatically listed with the `OL |` prefix, e.g. `OL | llama3.2`, `OL | mistral`.
 
 ---
 
@@ -238,9 +258,9 @@ Use the **OpenAI provider** with the proxy's `/v1/` base URL. The `apiKey` value
       "apiKey": "proxy"
     },
     {
-      "title": "155 | llama3.2",
+      "title": "OL | llama3.2",
       "provider": "openai",
-      "model": "155 | llama3.2",
+      "model": "OL | llama3.2",
       "apiBase": "http://127.0.0.1:5000/v1/",
       "apiKey": "proxy"
     }
@@ -263,7 +283,7 @@ Use the **OpenAI provider** with the proxy's `/v1/` base URL. The `apiKey` value
 2. **`GET /v1/models` or `GET /api/tags`** — returns the combined catalogue: remote Ollama models + all `GH |`, `GC |`, and `BR |` entries.
 
 3. **Request routing:**
-   - `155 | <model>` → strips prefix and forwards verbatim to `REMOTE_OLLAMA_URL`
+   - `OL | <model>` → strips prefix and forwards verbatim to `REMOTE_OLLAMA_URL`
    - `GH | <model>` / `GC | <model>` → calls the Azure AI Inference SDK against the appropriate endpoint with the correct bearer token
    - `BR | <model>` → calls the AWS Bedrock `converse` / `converse_stream` / `invoke_model` API via boto3
    - Bare or unknown model names → forwarded to the remote Ollama server as-is
@@ -292,7 +312,7 @@ You need to complete the Copilot device-flow login. Open [http://localhost:5000/
 ### `self signed certificate in certificate chain`
 You are behind a corporate proxy that intercepts TLS. Set `DISABLE_SSL_VERIFY=true` in `.env` as a temporary workaround, or point `REQUESTS_CA_BUNDLE` at your corporate root certificate for a proper fix.
 
-### Remote Ollama models (`155 |`) not showing
+### Remote Ollama models (`OL |`) not showing
 Verify the remote server is reachable:
 ```bash
 curl http://192.168.1.155:11434/api/tags
