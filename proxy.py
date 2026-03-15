@@ -50,18 +50,22 @@ REMOTE_OLLAMA_URL = os.getenv("REMOTE_OLLAMA_URL", "http://192.168.1.155:11434")
 PORT = int(os.getenv("PORT", "5000"))
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
-GITHUB_TOKEN_COPILOT = os.getenv("GITHUB_TOKEN_COPILOT", "")
 GITHUB_INFERENCE_ENDPOINT = "https://models.inference.ai.azure.com"
 
 # ---------------------------------------------------------------------------
 # Model discovery
 #
-# On startup we query the live /models endpoint for each configured token and
-# build the catalogue dynamically. The hardcoded list below is only used as a
-# fallback when the discovery request fails (e.g. no network, bad token).
+# On startup we query the live /models endpoint and build the catalogue
+# dynamically. The hardcoded list below is only used as a fallback when the
+# discovery request fails (e.g. no network, bad token).
+#
+# Note: GitHub Copilot Chat (api.githubcopilot.com) uses OAuth app tokens
+# obtained via the VS Code / Zed extension login flow — PATs are explicitly
+# rejected by that endpoint. All models here come from the GitHub Models
+# inference endpoint (models.inference.ai.azure.com) using a standard PAT.
 # ---------------------------------------------------------------------------
 
-_FALLBACK_STANDARD = [
+_FALLBACK_MODELS = [
     {"sdk_name": "gpt-4o", "family": "gpt", "size": "unknown"},
     {"sdk_name": "gpt-4o-mini", "family": "gpt", "size": "unknown"},
     {"sdk_name": "gpt-4.1", "family": "gpt", "size": "unknown"},
@@ -69,8 +73,6 @@ _FALLBACK_STANDARD = [
     {"sdk_name": "Meta-Llama-3.1-405B-Instruct", "family": "llama", "size": "405B"},
     {"sdk_name": "Meta-Llama-3.1-8B-Instruct", "family": "llama", "size": "8B"},
 ]
-
-_FALLBACK_COPILOT: list[dict] = []  # nothing confirmed yet; populated by discovery
 
 
 def _discover_models(token: str, prefix: str, token_label: str) -> list[dict]:
@@ -81,7 +83,7 @@ def _discover_models(token: str, prefix: str, token_label: str) -> list[dict]:
     if not token:
         return []
 
-    fallback = _FALLBACK_STANDARD if token_label == "standard" else _FALLBACK_COPILOT
+    fallback = _FALLBACK_MODELS
 
     try:
         resp = requests.get(
@@ -151,61 +153,22 @@ def _discover_models(token: str, prefix: str, token_label: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 GH_PREFIX = "GH | "
-GC_PREFIX = "GC | "
 REMOTE_PREFIX = "155 | "
 
-
 # Populated at module load time by querying the live /models endpoint.
-# If both tokens resolve to the same sdk_names, only the standard-tier
-# (GH |) entries are kept to avoid showing duplicate models.
-def _build_github_models() -> list[dict]:
-    standard = _discover_models(GITHUB_TOKEN, GH_PREFIX, "standard")
-    copilot = _discover_models(GITHUB_TOKEN_COPILOT, GC_PREFIX, "copilot")
-
-    if not copilot:
-        return standard
-
-    standard_sdk_names = {m["sdk_name"] for m in standard}
-    copilot_sdk_names = {m["sdk_name"] for m in copilot}
-
-    if standard_sdk_names == copilot_sdk_names:
-        log.info(
-            "Both tokens return identical model sets — "
-            "suppressing GC | duplicates. "
-            "GITHUB_TOKEN_COPILOT may be the same account as GITHUB_TOKEN."
-        )
-        return standard
-
-    # Only include copilot entries that aren't already in the standard set
-    unique_copilot = [m for m in copilot if m["sdk_name"] not in standard_sdk_names]
-    if len(unique_copilot) < len(copilot):
-        log.info(
-            "Suppressed %d GC | models already present under GH | prefix",
-            len(copilot) - len(unique_copilot),
-        )
-    return standard + unique_copilot
-
-
-GITHUB_MODELS: list[dict] = _build_github_models()
+GITHUB_MODELS: list[dict] = _discover_models(GITHUB_TOKEN, GH_PREFIX, "standard")
 
 # Fast lookup: display name -> catalogue entry
 GITHUB_MODEL_MAP: dict[str, dict] = {m["name"]: m for m in GITHUB_MODELS}
 
 
 def _active_github_models() -> list[dict]:
-    """Return all discovered models (discovery already filtered by token availability)."""
+    """Return all discovered models."""
     return GITHUB_MODELS
 
 
 def _token_for_model(name: str) -> str:
-    """Return the appropriate token string for the given (canonical) model name."""
-    entry = GITHUB_MODEL_MAP.get(name, {})
-    if entry.get("token") == "copilot":
-        if not GITHUB_TOKEN_COPILOT:
-            raise RuntimeError(
-                f"'{name}' requires GITHUB_TOKEN_COPILOT, which is not set."
-            )
-        return GITHUB_TOKEN_COPILOT
+    """Return the token string for the given (canonical) model name."""
     if not GITHUB_TOKEN:
         raise RuntimeError(f"'{name}' requires GITHUB_TOKEN, which is not set.")
     return GITHUB_TOKEN
@@ -220,26 +183,22 @@ def _canonical_gh_name(name: str) -> str:
     """Return the prefixed display name regardless of whether the prefix was supplied.
 
     Handles these input forms:
-      - "GH | gpt-4o"            (already canonical, standard)
-      - "GC | claude-haiku-4-5"  (already canonical, copilot)
-      - "claude-haiku-4-5"       (bare, dashes)
-      - "claude-haiku-4.5"       (bare, dots — as sent by Continue.dev)
+      - "GH | gpt-4o"      (already canonical)
+      - "gpt-4o"           (bare)
+      - "gpt-4.1"          (bare with dots — normalised to dashes for lookup)
     """
     if name in GITHUB_MODEL_MAP:
         return name
-    # Try both prefixes as-is
-    for prefix in (GH_PREFIX, GC_PREFIX):
-        prefixed = prefix + name
-        if prefixed in GITHUB_MODEL_MAP:
-            return prefixed
-    # Normalise dots to dashes and try again (e.g. "claude-haiku-4.5" -> "claude-haiku-4-5")
+    prefixed = GH_PREFIX + name
+    if prefixed in GITHUB_MODEL_MAP:
+        return prefixed
+    # Normalise dots to dashes and try again
     normalised = name.replace(".", "-")
     if normalised in GITHUB_MODEL_MAP:
         return normalised
-    for prefix in (GH_PREFIX, GC_PREFIX):
-        prefixed_normalised = prefix + normalised
-        if prefixed_normalised in GITHUB_MODEL_MAP:
-            return prefixed_normalised
+    prefixed_normalised = GH_PREFIX + normalised
+    if prefixed_normalised in GITHUB_MODEL_MAP:
+        return prefixed_normalised
     return name
 
 
@@ -596,20 +555,10 @@ def chat():
         return make_proxy_response(resp)
 
     if is_github_model(model_name):
-        entry = GITHUB_MODEL_MAP.get(_canonical_gh_name(model_name), {})
-        required_token = (
-            GITHUB_TOKEN_COPILOT if entry.get("token") == "copilot" else GITHUB_TOKEN
-        )
-        if not required_token:
-            token_var = (
-                "GITHUB_TOKEN_COPILOT"
-                if entry.get("token") == "copilot"
-                else "GITHUB_TOKEN"
-            )
-            err = {
-                "error": f"'{model_name}' requires {token_var}, which is not set in your .env."
-            }
-            return jsonify(err), 500
+        if not GITHUB_TOKEN:
+            return jsonify(
+                {"error": "GITHUB_TOKEN is not configured on the proxy server."}
+            ), 500
 
         if do_stream:
             return Response(
@@ -654,20 +603,10 @@ def generate():
 
     if is_github_model(model_name):
         model_name = _canonical_gh_name(model_name)
-        entry = GITHUB_MODEL_MAP.get(model_name, {})
-        required_token = (
-            GITHUB_TOKEN_COPILOT if entry.get("token") == "copilot" else GITHUB_TOKEN
-        )
-        if not required_token:
-            token_var = (
-                "GITHUB_TOKEN_COPILOT"
-                if entry.get("token") == "copilot"
-                else "GITHUB_TOKEN"
-            )
-            err = {
-                "error": f"'{model_name}' requires {token_var}, which is not set in your .env."
-            }
-            return jsonify(err), 500
+        if not GITHUB_TOKEN:
+            return jsonify(
+                {"error": "GITHUB_TOKEN is not configured on the proxy server."}
+            ), 500
 
         if do_stream:
             return Response(
@@ -716,19 +655,13 @@ def chat_completions():
     # result in an OpenAI-compat envelope (non-streaming only for simplicity).
     if is_github_model(model_name):
         model_name = _canonical_gh_name(model_name)
-        entry = GITHUB_MODEL_MAP.get(model_name, {})
-        required_token = (
-            GITHUB_TOKEN_COPILOT if entry.get("token") == "copilot" else GITHUB_TOKEN
-        )
-        if not required_token:
-            token_var = (
-                "GITHUB_TOKEN_COPILOT"
-                if entry.get("token") == "copilot"
-                else "GITHUB_TOKEN"
-            )
+        if not GITHUB_TOKEN:
             return jsonify(
                 {
-                    "error": f"'{model_name}' requires {token_var}, which is not set in your .env."
+                    "error": {
+                        "message": "GITHUB_TOKEN is not configured.",
+                        "type": "api_error",
+                    }
                 }
             ), 500
 
@@ -851,12 +784,7 @@ def health():
     except Exception:
         remote_status = "error"
 
-    github_status = {
-        "standard": "ready" if GITHUB_TOKEN else "not set — add GITHUB_TOKEN to .env",
-        "copilot": "ready"
-        if GITHUB_TOKEN_COPILOT
-        else "not set — add GITHUB_TOKEN_COPILOT to .env (optional)",
-    }
+    github_status = "ready" if GITHUB_TOKEN else "not set — add GITHUB_TOKEN to .env"
     status = "healthy" if remote_status == "ok" else "degraded"
 
     return jsonify(
@@ -1020,20 +948,11 @@ def v1_chat_completions():
 
     if is_github_model(model_name):
         model_name = _canonical_gh_name(model_name)
-        entry = GITHUB_MODEL_MAP.get(model_name, {})
-        required_token = (
-            GITHUB_TOKEN_COPILOT if entry.get("token") == "copilot" else GITHUB_TOKEN
-        )
-        if not required_token:
-            token_var = (
-                "GITHUB_TOKEN_COPILOT"
-                if entry.get("token") == "copilot"
-                else "GITHUB_TOKEN"
-            )
+        if not GITHUB_TOKEN:
             return jsonify(
                 {
                     "error": {
-                        "message": f"'{model_name}' requires {token_var}, which is not set in your .env.",
+                        "message": "GITHUB_TOKEN is not configured.",
                         "type": "api_error",
                     }
                 }
@@ -1099,21 +1018,9 @@ if __name__ == "__main__":
     log.info("GitHub Models         : %s", GITHUB_INFERENCE_ENDPOINT)
     log.info(
         "GITHUB_TOKEN          : %s",
-        "configured"
-        if GITHUB_TOKEN
-        else "NOT SET — standard GH models will return 500",
+        "configured" if GITHUB_TOKEN else "NOT SET — GH | models will return 500",
     )
-    log.info(
-        "GITHUB_TOKEN_COPILOT  : %s",
-        "configured"
-        if GITHUB_TOKEN_COPILOT
-        else "not set — Copilot-tier models hidden",
-    )
-    log.info(
-        "Active GitHub models  : %d / %d",
-        len(_active_github_models()),
-        len(GITHUB_MODELS),
-    )
+    log.info("Active GitHub models  : %d", len(GITHUB_MODELS))
     log.info("Listening on       : http://0.0.0.0:%d", PORT)
     # debug=False is intentional — debug mode returns HTML error pages
     app.run(host="0.0.0.0", port=PORT, debug=False)

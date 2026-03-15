@@ -75,9 +75,9 @@ In your Continue.dev `config.json`, point the provider at the proxy using the **
 
 ## Available Models
 
-### Standard GitHub Models (`GH | ` prefix)
+### GitHub Models (`GH | ` prefix)
 
-Available with a regular GitHub PAT (`GITHUB_TOKEN`). Confirmed working via `https://models.inference.ai.azure.com`:
+The proxy queries `https://models.inference.ai.azure.com/models` at startup and advertises whatever your token can access. Typical models available with a standard GitHub PAT:
 
 | Display name | GitHub SDK model ID |
 |---|---|
@@ -87,24 +87,16 @@ Available with a regular GitHub PAT (`GITHUB_TOKEN`). Confirmed working via `htt
 | `GH \| gpt-4.1-mini` | `gpt-4.1-mini` |
 | `GH \| Meta-Llama-3.1-405B-Instruct` | `Meta-Llama-3.1-405B-Instruct` |
 | `GH \| Meta-Llama-3.1-8B-Instruct` | `Meta-Llama-3.1-8B-Instruct` |
+| `GH \| Mistral-Nemo` | `Mistral-Nemo` |
+| *(and more, depending on your account)* | |
 
-> To see exactly which models your token can access:
-> ```bash
-> curl -H "Authorization: Bearer $GITHUB_TOKEN" https://models.inference.ai.azure.com/models
-> ```
+To see exactly which models your token can access:
+```bash
+curl -H "Authorization: Bearer $GITHUB_TOKEN" https://models.inference.ai.azure.com/models
+```
 
-### GitHub Copilot Models (`GC | ` prefix)
-
-Requires a Copilot Pro / Business / Enterprise token (`GITHUB_TOKEN_COPILOT`). These models are hidden from the model list until `GITHUB_TOKEN_COPILOT` is set in your `.env`:
-
-| Display name | GitHub SDK model ID |
-|---|---|
-| `GC \| claude-haiku-4-5` | `claude-haiku-4-5` |
-| `GC \| claude-sonnet-4-5` | `claude-sonnet-4-5` |
-| `GC \| claude-opus-4-5` | `claude-opus-4-5` |
-| `GC \| gemini-2.0-flash` | `gemini-2.0-flash` |
-| `GC \| grok-3` | `grok-3` |
-| `GC \| grok-3-mini` | `grok-3-mini` |
+> **What about Claude, Gemini, Grok?**
+> Those models are served via the GitHub Copilot Chat API (`api.githubcopilot.com`), which uses an OAuth token obtained interactively through the VS Code or Zed Copilot extension — **PATs are explicitly rejected by that endpoint**. They cannot be accessed through this proxy regardless of your Copilot plan.
 
 ### Remote Ollama Models (`155 | ` prefix)
 
@@ -152,7 +144,6 @@ All configuration is via environment variables (or a `.env` file):
 | Variable | Default | Description |
 |---|---|---|
 | `GITHUB_TOKEN` | *(required for `GH \|` models)* | Standard GitHub PAT — create at github.com/settings/tokens |
-| `GITHUB_TOKEN_COPILOT` | *(optional, for `GC \|` models)* | Copilot Pro/Business/Enterprise PAT — unlocks Claude, Gemini, Grok |
 | `REMOTE_OLLAMA_URL` | `http://192.168.1.155:11434` | Remote Ollama server address |
 | `PORT` | `5000` | Port the proxy listens on |
 
