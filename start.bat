@@ -38,6 +38,22 @@ if not exist "proxy.py" (
 echo Python detected! Launching proxy.py...
 echo (Use Ctrl+C in this window to stop the proxy)
 echo.
+:: Install dependencies if a requirements.txt file exists
+if exist "requirements.txt" (
+    echo Found requirements.txt — installing dependencies...
+    python -m pip install -r requirements.txt
+    if %ERRORLEVEL% NEQ 0 (
+        echo.
+        echo WARNING: Installing dependencies failed. You may need to run:
+        echo   python -m pip install -r requirements.txt
+        echo Press any key to continue and attempt to run proxy anyway, or Ctrl+C to abort.
+        pause >nul
+    ) else (
+        echo Dependencies installed.
+    )
+) else (
+    echo requirements.txt not found; skipping dependency installation.
+)
 
 :: Run the proxy
 python proxy.py

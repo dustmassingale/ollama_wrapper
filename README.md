@@ -59,9 +59,21 @@ GITHUB_TOKEN=github_pat_...
 
 ### 3. Run
 
+- Cross-platform (Python):
+
 ```bash
 python proxy.py
 ```
+
+- Windows (start.bat):
+
+Double-click `start.bat` or run it from a Command Prompt/PowerShell:
+
+```powershell
+start.bat
+```
+
+`start.bat` will attempt to install dependencies from `requirements.txt` using `python -m pip install -r requirements.txt` before launching the proxy. If installation fails, it prints a warning so you can retry manually.
 
 The proxy starts on **`http://localhost:5000`** (or the port set in `PORT`).
 
