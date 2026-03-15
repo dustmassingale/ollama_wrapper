@@ -1,9 +1,13 @@
 """
-Ollama Proxy Server with real GitHub Models support.
+Ollama Proxy Server with GitHub Models + GitHub Copilot support.
 
 - Ollama API requests are proxied to the remote server at REMOTE_OLLAMA_URL.
-- GitHub model requests are fulfilled via the azure-ai-inference SDK against
-  https://models.inference.ai.azure.com using a GITHUB_TOKEN env var.
+- GH | models use the azure-ai-inference SDK against
+  https://models.inference.ai.azure.com with a standard GitHub PAT.
+- GC | models use the GitHub Copilot Chat API (api.githubcopilot.com) via
+  an OAuth token obtained through the GitHub device flow. Run:
+    GET http://localhost:5000/auth/copilot
+  and follow the instructions to log in through your browser.
 - Responses are translated into Ollama-format NDJSON so any Ollama client
   (Continue.dev, Open WebUI, etc.) works transparently.
 """
@@ -12,7 +16,10 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import requests
 from azure.ai.inference import ChatCompletionsClient
@@ -53,16 +60,121 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_INFERENCE_ENDPOINT = "https://models.inference.ai.azure.com"
 
 # ---------------------------------------------------------------------------
-# Model discovery
-#
-# On startup we query the live /models endpoint and build the catalogue
-# dynamically. The hardcoded list below is only used as a fallback when the
-# discovery request fails (e.g. no network, bad token).
-#
-# Note: GitHub Copilot Chat (api.githubcopilot.com) uses OAuth app tokens
-# obtained via the VS Code / Zed extension login flow — PATs are explicitly
-# rejected by that endpoint. All models here come from the GitHub Models
-# inference endpoint (models.inference.ai.azure.com) using a standard PAT.
+# GitHub Copilot OAuth — device flow
+# ---------------------------------------------------------------------------
+
+# The public client_id used by the VS Code GitHub Copilot extension.
+COPILOT_CLIENT_ID = "Iv1.b507a08c87ecfe98"
+COPILOT_CHAT_ENDPOINT = "https://api.githubcopilot.com"
+COPILOT_CHAT_HEADERS = {
+    "Copilot-Integration-Id": "vscode-chat",
+    "Editor-Version": "vscode/1.97.0",
+    "Content-Type": "application/json",
+}
+
+# In-memory Copilot OAuth token (populated by device flow or from .env).
+# Access via _get_copilot_token() / _set_copilot_token().
+_copilot_token: str = os.getenv("GITHUB_TOKEN_COPILOT", "")
+_copilot_token_lock = threading.Lock()
+
+# Tracks a pending device-flow authorisation.
+_pending_device_flow: dict = {}
+
+
+def _get_copilot_token() -> str:
+    with _copilot_token_lock:
+        return _copilot_token
+
+
+def _set_copilot_token(token: str) -> None:
+    global _copilot_token
+    with _copilot_token_lock:
+        _copilot_token = token
+    # Persist to .env so it survives restarts
+    env_path = Path(".env")
+    try:
+        if env_path.exists():
+            text = env_path.read_text()
+            if "GITHUB_TOKEN_COPILOT=" in text:
+                lines = [
+                    f"GITHUB_TOKEN_COPILOT={token}\n"
+                    if l.startswith("GITHUB_TOKEN_COPILOT=")
+                    else l
+                    for l in text.splitlines(keepends=True)
+                ]
+                env_path.write_text("".join(lines))
+            else:
+                with env_path.open("a") as f:
+                    f.write(f"\nGITHUB_TOKEN_COPILOT={token}\n")
+        else:
+            env_path.write_text(f"GITHUB_TOKEN_COPILOT={token}\n")
+        log.info("Copilot token persisted to .env")
+    except Exception as e:
+        log.warning("Could not persist Copilot token to .env: %s", e)
+
+
+def _discover_copilot_models() -> list[dict]:
+    """Query api.githubcopilot.com/models and return catalogue entries."""
+    token = _get_copilot_token()
+    if not token:
+        return []
+    try:
+        resp = requests.get(
+            f"{COPILOT_CHAT_ENDPOINT}/models",
+            headers={**COPILOT_CHAT_HEADERS, "Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        raw = resp.json().get("data", [])
+        # Only keep chat models (skip embedding / image models)
+        SKIP = {"embeddings", "embed", "image", "dall-e", "whisper", "tts"}
+        entries = []
+        for m in raw:
+            mid = m.get("id", "")
+            if not mid:
+                continue
+            if any(kw in mid.lower() for kw in SKIP):
+                continue
+            entries.append(
+                {
+                    "name": f"{GC_PREFIX}{mid}",
+                    "sdk_name": mid,
+                    "token": "copilot",
+                    "size": 0,
+                    "modified_at": "2024-01-01T00:00:00Z",
+                    "details": {
+                        "family": mid.split("-")[0].lower(),
+                        "parameter_size": "unknown",
+                    },
+                }
+            )
+        log.info("Discovered %d Copilot models (GC |)", len(entries))
+        return entries
+    except Exception as e:
+        log.warning("Copilot model discovery failed: %s", e)
+        return []
+
+
+def _rebuild_catalogue() -> None:
+    """Rebuild GITHUB_MODELS + GITHUB_MODEL_MAP after a new Copilot token arrives."""
+    global GITHUB_MODELS, GITHUB_MODEL_MAP
+    gh_models = _discover_models(GITHUB_TOKEN, GH_PREFIX, "standard")
+    gc_models = _discover_copilot_models()
+    # Avoid duplicating models that appear in both endpoints
+    gc_sdk_names = {m["sdk_name"] for m in gh_models}
+    unique_gc = [m for m in gc_models if m["sdk_name"] not in gc_sdk_names]
+    GITHUB_MODELS = gh_models + unique_gc
+    GITHUB_MODEL_MAP = {m["name"]: m for m in GITHUB_MODELS}
+    log.info(
+        "Catalogue rebuilt: %d GH | + %d GC | = %d total",
+        len(gh_models),
+        len(unique_gc),
+        len(GITHUB_MODELS),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model discovery — standard GitHub Models (PAT-based)
 # ---------------------------------------------------------------------------
 
 _FALLBACK_MODELS = [
@@ -153,22 +265,34 @@ def _discover_models(token: str, prefix: str, token_label: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 GH_PREFIX = "GH | "
+GC_PREFIX = "GC | "
 REMOTE_PREFIX = "155 | "
 
-# Populated at module load time by querying the live /models endpoint.
+# Populated at module load time; rebuilt after Copilot login via _rebuild_catalogue().
 GITHUB_MODELS: list[dict] = _discover_models(GITHUB_TOKEN, GH_PREFIX, "standard")
-
-# Fast lookup: display name -> catalogue entry
 GITHUB_MODEL_MAP: dict[str, dict] = {m["name"]: m for m in GITHUB_MODELS}
+
+# Kick off Copilot discovery now if a token is already in .env
+if _get_copilot_token():
+    _rebuild_catalogue()
 
 
 def _active_github_models() -> list[dict]:
-    """Return all discovered models."""
+    """Return all currently known models."""
     return GITHUB_MODELS
 
 
 def _token_for_model(name: str) -> str:
-    """Return the token string for the given (canonical) model name."""
+    """Return the correct bearer token for the given canonical model name."""
+    entry = GITHUB_MODEL_MAP.get(name, {})
+    if entry.get("token") == "copilot":
+        token = _get_copilot_token()
+        if not token:
+            raise RuntimeError(
+                f"'{name}' is a Copilot model. "
+                "Log in first: GET http://localhost:5000/auth/copilot"
+            )
+        return token
     if not GITHUB_TOKEN:
         raise RuntimeError(f"'{name}' requires GITHUB_TOKEN, which is not set.")
     return GITHUB_TOKEN
@@ -180,25 +304,28 @@ def is_github_model(name: str) -> bool:
 
 
 def _canonical_gh_name(name: str) -> str:
-    """Return the prefixed display name regardless of whether the prefix was supplied.
+    """Return the prefixed display name regardless of how the client sent it.
 
-    Handles these input forms:
-      - "GH | gpt-4o"      (already canonical)
-      - "gpt-4o"           (bare)
-      - "gpt-4.1"          (bare with dots — normalised to dashes for lookup)
+    Handles:
+      - "GH | gpt-4o"            (already canonical, standard)
+      - "GC | claude-haiku-4.5"  (already canonical, copilot)
+      - "gpt-4o"                 (bare)
+      - "claude-haiku-4.5"       (bare with dots — tried with both prefixes)
     """
     if name in GITHUB_MODEL_MAP:
         return name
-    prefixed = GH_PREFIX + name
-    if prefixed in GITHUB_MODEL_MAP:
-        return prefixed
-    # Normalise dots to dashes and try again
+    for prefix in (GH_PREFIX, GC_PREFIX):
+        prefixed = prefix + name
+        if prefixed in GITHUB_MODEL_MAP:
+            return prefixed
+    # Normalise dots to dashes and retry with both prefixes
     normalised = name.replace(".", "-")
     if normalised in GITHUB_MODEL_MAP:
         return normalised
-    prefixed_normalised = GH_PREFIX + normalised
-    if prefixed_normalised in GITHUB_MODEL_MAP:
-        return prefixed_normalised
+    for prefix in (GH_PREFIX, GC_PREFIX):
+        prefixed_normalised = prefix + normalised
+        if prefixed_normalised in GITHUB_MODEL_MAP:
+            return prefixed_normalised
     return name
 
 
@@ -290,12 +417,22 @@ def make_streaming_proxy_response(
 
 
 def _build_github_client(model_name: str) -> ChatCompletionsClient:
-    """Build a ChatCompletionsClient using the correct token for the model."""
+    """Build a ChatCompletionsClient using the correct endpoint and token."""
+    entry = GITHUB_MODEL_MAP.get(model_name, {})
     token = _token_for_model(model_name)
-    return ChatCompletionsClient(
-        endpoint=GITHUB_INFERENCE_ENDPOINT,
+    endpoint = (
+        COPILOT_CHAT_ENDPOINT
+        if entry.get("token") == "copilot"
+        else GITHUB_INFERENCE_ENDPOINT
+    )
+    client = ChatCompletionsClient(
+        endpoint=endpoint,
         credential=AzureKeyCredential(token),
     )
+    if entry.get("token") == "copilot":
+        # The Copilot endpoint requires extra headers
+        client._config.headers_policy.headers.update(COPILOT_CHAT_HEADERS)
+    return client
 
 
 def _ollama_messages_to_sdk(messages: list[dict]):
@@ -776,6 +913,155 @@ def copy():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# /auth/copilot  — GitHub device flow login
+# /auth/status   — check Copilot login state
+# ---------------------------------------------------------------------------
+
+
+@app.route("/auth/copilot", methods=["GET"])
+def auth_copilot():
+    """Kick off the GitHub device flow to obtain a Copilot OAuth token."""
+    global _pending_device_flow
+
+    if _get_copilot_token():
+        # Already logged in — check it still works
+        try:
+            resp = requests.get(
+                f"{COPILOT_CHAT_ENDPOINT}/models",
+                headers={
+                    **COPILOT_CHAT_HEADERS,
+                    "Authorization": f"Bearer {_get_copilot_token()}",
+                },
+                timeout=5,
+            )
+            if resp.status_code == 200:
+                model_count = len(resp.json().get("data", []))
+                return jsonify(
+                    {
+                        "status": "already_authenticated",
+                        "message": "Copilot token is valid.",
+                        "copilot_models_available": model_count,
+                    }
+                )
+        except Exception:
+            pass
+        # Token is stale — fall through to re-auth
+        log.info("Copilot token stale — starting new device flow")
+
+    # Request device code
+    r = requests.post(
+        "https://github.com/login/device/code",
+        headers={"Accept": "application/json"},
+        data={"client_id": COPILOT_CLIENT_ID, "scope": ""},
+        timeout=10,
+    )
+    r.raise_for_status()
+    d = r.json()
+
+    _pending_device_flow = {
+        "device_code": d["device_code"],
+        "interval": d.get("interval", 5),
+        "expires_at": time.time() + d.get("expires_in", 900),
+    }
+
+    # Poll in a background thread so the endpoint returns immediately
+    threading.Thread(target=_poll_device_flow, daemon=True).start()
+
+    return jsonify(
+        {
+            "status": "pending",
+            "message": (
+                f"1. Open https://github.com/login/device in your browser\n"
+                f"2. Enter code: {d['user_code']}\n"
+                f"3. Approve the request\n"
+                f"4. Poll GET /auth/status until status is 'authenticated'"
+            ),
+            "verification_uri": d["verification_uri"],
+            "user_code": d["user_code"],
+            "expires_in_seconds": d.get("expires_in", 900),
+        }
+    )
+
+
+def _poll_device_flow() -> None:
+    """Background thread: poll GitHub until the user approves or the code expires."""
+    global _pending_device_flow
+    flow = _pending_device_flow
+    interval = flow["interval"]
+
+    log.info("Device flow polling started")
+    while time.time() < flow["expires_at"]:
+        time.sleep(interval)
+        try:
+            r = requests.post(
+                "https://github.com/login/oauth/access_token",
+                headers={"Accept": "application/json"},
+                data={
+                    "client_id": COPILOT_CLIENT_ID,
+                    "device_code": flow["device_code"],
+                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                },
+                timeout=10,
+            )
+            data = r.json()
+        except Exception as e:
+            log.warning("Device flow poll error: %s", e)
+            continue
+
+        if "access_token" in data:
+            token = data["access_token"]
+            _set_copilot_token(token)
+            _pending_device_flow = {}
+            log.info("Copilot OAuth token obtained — rebuilding model catalogue")
+            _rebuild_catalogue()
+            return
+        elif data.get("error") == "slow_down":
+            interval += 5
+        elif data.get("error") == "authorization_pending":
+            pass
+        else:
+            log.warning("Device flow ended: %s", data.get("error", data))
+            _pending_device_flow = {}
+            return
+
+    log.warning("Device flow expired without approval")
+    _pending_device_flow = {}
+
+
+@app.route("/auth/status", methods=["GET"])
+def auth_status():
+    """Report the current Copilot authentication state."""
+    token = _get_copilot_token()
+    pending = bool(_pending_device_flow)
+
+    if pending:
+        return jsonify(
+            {
+                "status": "pending",
+                "message": "Waiting for browser approval. Check /auth/copilot for the code.",
+            }
+        )
+
+    if not token:
+        return jsonify(
+            {
+                "status": "unauthenticated",
+                "message": "No Copilot token. Call GET /auth/copilot to log in.",
+                "gc_models": 0,
+            }
+        )
+
+    gc_count = sum(1 for m in GITHUB_MODELS if m.get("token") == "copilot")
+    return jsonify(
+        {
+            "status": "authenticated",
+            "message": f"{gc_count} GC | Copilot models available.",
+            "gc_models": gc_count,
+        }
+    )
+
+
 @app.route("/health", methods=["GET"])
 def health():
     try:
@@ -784,14 +1070,22 @@ def health():
     except Exception:
         remote_status = "error"
 
-    github_status = "ready" if GITHUB_TOKEN else "not set — add GITHUB_TOKEN to .env"
+    gh_status = "ready" if GITHUB_TOKEN else "not set — add GITHUB_TOKEN to .env"
+    gc_token = _get_copilot_token()
+    gc_count = sum(1 for m in GITHUB_MODELS if m.get("token") == "copilot")
+    gc_status = (
+        f"authenticated ({gc_count} models)"
+        if gc_token
+        else "not logged in — GET /auth/copilot"
+    )
     status = "healthy" if remote_status == "ok" else "degraded"
 
     return jsonify(
         {
             "status": status,
             "remote_ollama": remote_status,
-            "github_models": github_status,
+            "github_models": gh_status,
+            "copilot_models": gc_status,
         }
     )
 
@@ -801,7 +1095,7 @@ def root():
     return jsonify(
         {
             "message": "Ollama Proxy with GitHub Models",
-            "version": "1.4.0",
+            "version": "1.5.0",
             "endpoints": [
                 "GET    /api/tags              — list all models",
                 "POST   /api/show              — model metadata",
@@ -816,6 +1110,8 @@ def root():
                 "POST   /api/copy              — copy a model",
                 "GET    /v1/models             — OpenAI-compat model list",
                 "POST   /v1/chat/completions   — OpenAI-compat chat completions",
+                "GET    /auth/copilot          — start Copilot browser login (device flow)",
+                "GET    /auth/status           — check Copilot login state",
                 "GET    /health                — health check",
             ],
         }
@@ -1020,7 +1316,13 @@ if __name__ == "__main__":
         "GITHUB_TOKEN          : %s",
         "configured" if GITHUB_TOKEN else "NOT SET — GH | models will return 500",
     )
-    log.info("Active GitHub models  : %d", len(GITHUB_MODELS))
-    log.info("Listening on       : http://0.0.0.0:%d", PORT)
+    gc_count = sum(1 for m in GITHUB_MODELS if m.get("token") == "copilot")
+    gh_count = sum(1 for m in GITHUB_MODELS if m.get("token") != "copilot")
+    log.info("GH | models           : %d", gh_count)
+    log.info(
+        "GC | models           : %s",
+        f"{gc_count} available" if gc_count else "0 — run GET /auth/copilot to log in",
+    )
+    log.info("Listening on          : http://0.0.0.0:%d", PORT)
     # debug=False is intentional — debug mode returns HTML error pages
     app.run(host="0.0.0.0", port=PORT, debug=False)
